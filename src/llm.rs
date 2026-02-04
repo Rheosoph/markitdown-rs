@@ -937,10 +937,7 @@ impl<M: CompletionModel + Send + Sync + 'static> LlmClient for LlmWrapper<M> {
         self.send_request(request).await
     }
 
-    async fn convert_page_images_batch(
-        &self,
-        pages: &[(&[u8], &str)],
-    ) -> Vec<Option<String>> {
+    async fn convert_page_images_batch(&self, pages: &[(&[u8], &str)]) -> Vec<Option<String>> {
         if pages.is_empty() {
             return Vec::new();
         }
@@ -1139,10 +1136,7 @@ impl LlmClient for MockLlmClient {
         Ok(self.text_response.clone())
     }
 
-    async fn convert_page_images_batch(
-        &self,
-        pages: &[(&[u8], &str)],
-    ) -> Vec<Option<String>> {
+    async fn convert_page_images_batch(&self, pages: &[(&[u8], &str)]) -> Vec<Option<String>> {
         vec![Some(self.text_response.clone()); pages.len()]
     }
 

@@ -158,7 +158,7 @@ impl JupyterConverter {
                     }
                     if let Some(html) = &data.text_html {
                         // Convert HTML to text (simple approach)
-                        return html2md::parse_html(&html.to_string());
+                        return htmd::convert(&html.to_string()).unwrap_or_default();
                     }
                 }
             }

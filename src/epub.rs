@@ -60,7 +60,7 @@ impl EpubConverter {
             if let Ok(data) = result {
                 let content = data.content();
                 // Content is XHTML, convert to markdown
-                let markdown = html2md::parse_html(content);
+                let markdown = htmd::convert(content).unwrap_or_default();
                 let cleaned = Self::clean_markdown(&markdown);
 
                 if !cleaned.is_empty() {

@@ -93,10 +93,11 @@ impl EmailConverter {
         markdown.push_str("---\n\n");
 
         // Body - prefer plain text, fallback to HTML
-        let body = message
-            .body_text(0)
-            .map(|s| s.to_string())
-            .or_else(|| message.body_html(0).map(|html| html2md::parse_html(&html)));
+        let body = message.body_text(0).map(|s| s.to_string()).or_else(|| {
+            message
+                .body_html(0)
+                .and_then(|html| htmd::convert(&html).ok())
+        });
 
         if let Some(body_text) = body {
             markdown.push_str(&body_text);

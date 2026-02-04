@@ -468,9 +468,8 @@ impl PdfConverter {
                 .unwrap_or(0);
 
             let metrics = PageMetrics::from_text_with_xobjects(page_text, xobject_count);
-            let needs_llm = (force_llm || metrics.should_use_llm())
-                && llm_client.is_some()
-                && pdf.is_some();
+            let needs_llm =
+                (force_llm || metrics.should_use_llm()) && llm_client.is_some() && pdf.is_some();
 
             if needs_llm {
                 pages_needing_llm.push(idx);

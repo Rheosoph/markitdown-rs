@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use bytes::Bytes;
-use html2md::parse_html;
 use object_store::ObjectStore;
 use regex::Regex;
 use std::sync::Arc;
@@ -36,7 +35,7 @@ impl HtmlConverter {
         }
 
         // Convert HTML to markdown
-        let markdown = parse_html(&content);
+        let markdown = htmd::convert(&content).unwrap_or_default();
         page.add_content(ContentBlock::Markdown(markdown));
 
         document.add_page(page);

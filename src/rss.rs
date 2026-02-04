@@ -3,7 +3,6 @@ use crate::model::{ContentBlock, ConversionOptions, Document, DocumentConverter,
 use async_trait::async_trait;
 use bytes::Bytes;
 use feed_rs::parser;
-use html2md::parse_html;
 use object_store::ObjectStore;
 use std::io::BufReader;
 use std::sync::Arc;
@@ -69,7 +68,7 @@ impl RssConverter {
             // Entry content
             if let Some(content) = &entry.content {
                 if let Some(body) = &content.body {
-                    let markdown = parse_html(body);
+                    let markdown = htmd::convert(body).unwrap_or_default();
                     page.add_content(ContentBlock::Markdown(markdown));
                 }
             }
@@ -94,7 +93,7 @@ impl RssConverter {
 
             // Entry summary
             if let Some(summary) = &entry.summary {
-                let markdown = parse_html(&summary.content);
+                let markdown = htmd::convert(&summary.content).unwrap_or_default();
                 page.add_content(ContentBlock::Markdown(markdown));
             }
         }
