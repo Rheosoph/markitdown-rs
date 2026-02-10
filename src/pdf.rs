@@ -16,6 +16,7 @@ use hayro_syntax::object::dict::keys::{HEIGHT, SUBTYPE, WIDTH};
 use hayro_syntax::object::{Name, Stream};
 use object_store::ObjectStore;
 use pdf_extract;
+use std::panic;
 use std::sync::Arc;
 
 use crate::error::MarkitdownError;
@@ -273,9 +274,19 @@ impl PdfConverter {
             .map_err(|e| MarkitdownError::ParseError(format!("Failed to parse PDF: {:?}", e)))
     }
 
-    /// Extract text from PDF and split by pages
+    /// Extract text from PDF and split by pages.
+    /// Uses catch_unwind to handle panics from pdf-extract on malformed PDFs.
     fn extract_text_by_page(bytes: &[u8]) -> Result<Vec<String>, MarkitdownError> {
-        let text_content = pdf_extract::extract_text_from_mem(bytes).map_err(|e| {
+        let bytes_owned = bytes.to_vec();
+        let text_content = panic::catch_unwind(move || {
+            pdf_extract::extract_text_from_mem(&bytes_owned)
+        })
+        .map_err(|_| {
+            MarkitdownError::ParseError(
+                "PDF text extraction panicked (likely malformed content stream)".to_string(),
+            )
+        })?
+        .map_err(|e| {
             MarkitdownError::ParseError(format!("Failed to extract text from PDF: {}", e))
         })?;
 
@@ -638,9 +649,14 @@ impl PdfConverter {
             }
         } else if document.pages.is_empty() {
             // Fallback: single page with all text
-            let text_content = pdf_extract::extract_text_from_mem(bytes)
-                .map(|t| t.trim().to_string())
-                .unwrap_or_default();
+            let bytes_owned = bytes.to_vec();
+            let text_content = panic::catch_unwind(move || {
+                pdf_extract::extract_text_from_mem(&bytes_owned)
+            })
+            .ok()
+            .and_then(|r| r.ok())
+            .map(|t| t.trim().to_string())
+            .unwrap_or_default();
             let mut page = Page::new(1);
             if text_content.is_empty() {
                 page.add_content(ContentBlock::Text(
