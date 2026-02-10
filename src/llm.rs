@@ -21,6 +21,7 @@
 use async_trait::async_trait;
 use base64::prelude::*;
 use futures::future::join_all;
+use futures::FutureExt;
 use image::ImageFormat;
 use rig::{
     completion::{AssistantContent, CompletionModel, CompletionRequest, CompletionRequestBuilder},
@@ -28,6 +29,7 @@ use rig::{
     OneOrMany,
 };
 use std::io::Cursor;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use crate::error::MarkitdownError;
@@ -283,12 +285,22 @@ impl<M: CompletionModel> LlmWrapper<M> {
         builder
     }
 
-    /// Send a request and extract the response text, with post-processing for repetition detection
+    /// Send a request and extract the response text, with post-processing for repetition detection.
+    /// Uses catch_unwind to handle panics from rig-core on invalid API responses (e.g. 400 errors).
     async fn send_request(&self, request: CompletionRequest) -> Result<String, MarkitdownError> {
-        let response = self
-            .model
-            .completion(request)
+        let response = AssertUnwindSafe(self.model.completion(request))
+            .catch_unwind()
             .await
+            .map_err(|panic_info| {
+                let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    s.to_string()
+                } else {
+                    "Unknown panic in LLM completion".to_string()
+                };
+                MarkitdownError::LlmError(format!("LLM completion panicked: {}", msg))
+            })?
             .map(|r| extract_text_from_response(&r.choice))
             .map_err(|e| MarkitdownError::LlmError(format!("LLM error: {}", e)))?;
 
