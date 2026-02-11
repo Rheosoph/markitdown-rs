@@ -1,3 +1,9 @@
+// Ensure at least one TLS backend is selected at compile time.
+#[cfg(not(any(feature = "native-tls", feature = "rustls-tls")))]
+compile_error!(
+    "At least one TLS backend must be enabled. Use feature \"native-tls\" or \"rustls-tls\"."
+);
+
 pub mod archive;
 pub mod bibtex;
 pub mod calendar;

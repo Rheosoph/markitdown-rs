@@ -6,6 +6,27 @@ description = "A Rust library designed to facilitate the conversion of various d
 repository = "https://github.com/TM9657/markitdown-rs"
 license = "MIT"
 
+[features]
+default = ["native-tls"]
+
+# TLS backend selection
+#
+# Choose which TLS implementation to use for network requests (LLM APIs, cloud storage, etc.)
+# Only one TLS backend should be enabled at a time.
+#
+# Note: `object_store` with cloud features always uses rustls internally.
+# These feature flags primarily control the TLS backend used by `rig-core` (LLM provider).
+
+# Use the platform's native TLS implementation:
+# - macOS: Security.framework
+# - Windows: SChannel
+# - Linux: OpenSSL
+native-tls = ["rig-core/reqwest-tls"]
+
+# Use rustls (pure-Rust TLS implementation) — no system OpenSSL dependency needed.
+# This is recommended for cross-compilation and reproducible builds.
+rustls-tls = ["rig-core/reqwest-rustls"]
+
 [dependencies]
 calamine = { version = "0.30", default-features = false, features = ["dates"] }
 clap = { version = "4.5.27", features = ["derive"] }
@@ -28,7 +49,7 @@ zip = { version = "6.0.0", default-features = false, features = [
 serde_json = "1.0.134"
 tokio = { version = "1.47.1", features = ["rt", "rt-multi-thread", "macros"] }
 base64 = "0.22.1"
-rig-core = "0.29.0"
+rig-core = { version = "0.29.0", default-features = false }
 feed-rs = "2.3.1"
 tempfile = "3.20.0"
 object_store = { version = "0.11.1", features = ["gcp", "aws", "azure", "serde", "serde_json", "cloud"] }

@@ -131,6 +131,23 @@ Add the following to your `Cargo.toml`:
 markitdown = "0.1.10"
 ```
 
+#### TLS Backend Selection
+
+By default, `markitdown` uses the platform's **native TLS** implementation (Security.framework on macOS, SChannel on Windows, OpenSSL on Linux). You can switch to a pure-Rust TLS backend (**rustls**) which removes the system OpenSSL dependency — useful for cross-compilation and reproducible builds.
+
+```toml
+# Default: native TLS (same as omitting features)
+markitdown = { version = "0.1.10", features = ["native-tls"] }
+
+# Pure-Rust TLS via rustls (no system OpenSSL needed)
+markitdown = { version = "0.1.10", default-features = false, features = ["rustls-tls"] }
+```
+
+| Feature | TLS Backend | System dependency |
+|---|---|---|
+| `native-tls` *(default)* | OS-native (Security.framework / SChannel / OpenSSL) | OpenSSL on Linux |
+| `rustls-tls` | rustls (pure Rust) | None |
+
 #### Initialize MarkItDown
 
 ```rust
