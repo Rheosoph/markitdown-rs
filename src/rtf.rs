@@ -39,7 +39,7 @@ impl DocumentConverter for RtfConverter {
     ) -> Result<Document, MarkitdownError> {
         if let Some(opts) = &options {
             if let Some(ext) = &opts.file_extension {
-                if ext != ".rtf" {
+                if ext.to_lowercase() != ".rtf" {
                     return Err(MarkitdownError::InvalidFile(format!(
                         "Expected .rtf file, got {}",
                         ext
@@ -60,7 +60,7 @@ impl DocumentConverter for RtfConverter {
     ) -> Result<Document, MarkitdownError> {
         if let Some(opts) = &options {
             if let Some(ext) = &opts.file_extension {
-                if ext != ".rtf" {
+                if ext.to_lowercase() != ".rtf" {
                     return Err(MarkitdownError::InvalidFile(format!(
                         "Expected .rtf file, got {}",
                         ext

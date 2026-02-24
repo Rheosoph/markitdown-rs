@@ -159,7 +159,7 @@ impl DocumentConverter for DocxConverter {
     ) -> Result<Document, MarkitdownError> {
         if let Some(opts) = &options {
             if let Some(ext) = &opts.file_extension {
-                if ext != ".docx" {
+                if ext.to_lowercase() != ".docx" {
                     return Err(MarkitdownError::InvalidFile(format!(
                         "Expected .docx file, got {}",
                         ext
@@ -196,7 +196,7 @@ impl DocumentConverter for DocxConverter {
     ) -> Result<Document, MarkitdownError> {
         if let Some(opts) = &options {
             if let Some(ext) = &opts.file_extension {
-                if ext != ".docx" {
+                if ext.to_lowercase() != ".docx" {
                     return Err(MarkitdownError::InvalidFile(format!(
                         "Expected .docx file, got {}",
                         ext

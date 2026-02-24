@@ -68,7 +68,7 @@ impl DocumentConverter for ExcelConverter {
     ) -> Result<Document, MarkitdownError> {
         if let Some(opts) = &options {
             if let Some(ext) = &opts.file_extension {
-                if ext != ".xlsx" && ext != ".xls" {
+                if ext.to_lowercase() != ".xlsx" && ext.to_lowercase() != ".xls" {
                     return Err(MarkitdownError::InvalidFile(format!(
                         "Expected .xlsx or .xls file, got {}",
                         ext
@@ -89,7 +89,7 @@ impl DocumentConverter for ExcelConverter {
     ) -> Result<Document, MarkitdownError> {
         if let Some(opts) = &options {
             if let Some(ext) = &opts.file_extension {
-                if ext != ".xlsx" && ext != ".xls" {
+                if ext.to_lowercase() != ".xlsx" && ext.to_lowercase() != ".xls" {
                     return Err(MarkitdownError::InvalidFile(format!(
                         "Expected .xlsx or .xls file, got {}",
                         ext

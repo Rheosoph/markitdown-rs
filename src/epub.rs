@@ -105,7 +105,7 @@ impl DocumentConverter for EpubConverter {
     ) -> Result<Document, MarkitdownError> {
         if let Some(opts) = &options {
             if let Some(ext) = &opts.file_extension {
-                if ext != ".epub" {
+                if ext.to_lowercase() != ".epub" {
                     return Err(MarkitdownError::InvalidFile(format!(
                         "Expected .epub file, got {}",
                         ext
@@ -126,7 +126,7 @@ impl DocumentConverter for EpubConverter {
     ) -> Result<Document, MarkitdownError> {
         if let Some(opts) = &options {
             if let Some(ext) = &opts.file_extension {
-                if ext != ".epub" {
+                if ext.to_lowercase() != ".epub" {
                     return Err(MarkitdownError::InvalidFile(format!(
                         "Expected .epub file, got {}",
                         ext

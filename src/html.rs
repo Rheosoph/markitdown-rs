@@ -53,7 +53,7 @@ impl DocumentConverter for HtmlConverter {
     ) -> Result<Document, MarkitdownError> {
         if let Some(opts) = &options {
             if let Some(ext) = &opts.file_extension {
-                if ext != ".html" && ext != ".htm" {
+                if ext.to_lowercase() != ".html" && ext.to_lowercase() != ".htm" {
                     return Err(MarkitdownError::InvalidFile(format!(
                         "Expected .html or .htm file, got {}",
                         ext
@@ -90,7 +90,7 @@ impl DocumentConverter for HtmlConverter {
     ) -> Result<Document, MarkitdownError> {
         if let Some(opts) = &options {
             if let Some(ext) = &opts.file_extension {
-                if ext != ".html" && ext != ".htm" {
+                if ext.to_lowercase() != ".html" && ext.to_lowercase() != ".htm" {
                     return Err(MarkitdownError::InvalidFile(format!(
                         "Expected .html or .htm file, got {}",
                         ext

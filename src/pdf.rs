@@ -682,7 +682,7 @@ impl DocumentConverter for PdfConverter {
     ) -> Result<Document, MarkitdownError> {
         if let Some(opts) = &options {
             if let Some(ext) = &opts.file_extension {
-                if ext != ".pdf" {
+                if ext.to_lowercase() != ".pdf" {
                     return Err(MarkitdownError::InvalidFile(format!(
                         "Expected .pdf file, got {}",
                         ext
@@ -714,7 +714,7 @@ impl DocumentConverter for PdfConverter {
     ) -> Result<Document, MarkitdownError> {
         if let Some(opts) = &options {
             if let Some(ext) = &opts.file_extension {
-                if ext != ".pdf" {
+                if ext.to_lowercase() != ".pdf" {
                     return Err(MarkitdownError::InvalidFile(format!(
                         "Expected .pdf file, got {}",
                         ext

@@ -104,7 +104,7 @@ impl DocumentConverter for ICalendarConverter {
     ) -> Result<Document, MarkitdownError> {
         if let Some(opts) = &options {
             if let Some(ext) = &opts.file_extension {
-                if ext != ".ics" && ext != ".ical" {
+                if ext.to_lowercase() != ".ics" && ext.to_lowercase() != ".ical" {
                     return Err(MarkitdownError::InvalidFile(format!(
                         "Expected .ics file, got {}",
                         ext
@@ -125,7 +125,7 @@ impl DocumentConverter for ICalendarConverter {
     ) -> Result<Document, MarkitdownError> {
         if let Some(opts) = &options {
             if let Some(ext) = &opts.file_extension {
-                if ext != ".ics" && ext != ".ical" {
+                if ext.to_lowercase() != ".ics" && ext.to_lowercase() != ".ical" {
                     return Err(MarkitdownError::InvalidFile(format!(
                         "Expected .ics file, got {}",
                         ext

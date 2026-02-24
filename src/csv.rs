@@ -56,7 +56,7 @@ impl DocumentConverter for CsvConverter {
     ) -> Result<Document, MarkitdownError> {
         if let Some(opts) = &options {
             if let Some(ext) = &opts.file_extension {
-                if ext != ".csv" {
+                if ext.to_lowercase() != ".csv" {
                     return Err(MarkitdownError::InvalidFile(format!(
                         "Expected .csv file, got {}",
                         ext
@@ -77,7 +77,7 @@ impl DocumentConverter for CsvConverter {
     ) -> Result<Document, MarkitdownError> {
         if let Some(opts) = &options {
             if let Some(ext) = &opts.file_extension {
-                if ext != ".csv" {
+                if ext.to_lowercase() != ".csv" {
                     return Err(MarkitdownError::InvalidFile(format!(
                         "Expected .csv file, got {}",
                         ext

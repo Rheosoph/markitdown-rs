@@ -103,7 +103,7 @@ impl DocumentConverter for VCardConverter {
     ) -> Result<Document, MarkitdownError> {
         if let Some(opts) = &options {
             if let Some(ext) = &opts.file_extension {
-                if ext != ".vcf" && ext != ".vcard" {
+                if ext.to_lowercase() != ".vcf" && ext.to_lowercase() != ".vcard" {
                     return Err(MarkitdownError::InvalidFile(format!(
                         "Expected .vcf file, got {}",
                         ext
@@ -124,7 +124,7 @@ impl DocumentConverter for VCardConverter {
     ) -> Result<Document, MarkitdownError> {
         if let Some(opts) = &options {
             if let Some(ext) = &opts.file_extension {
-                if ext != ".vcf" && ext != ".vcard" {
+                if ext.to_lowercase() != ".vcf" && ext.to_lowercase() != ".vcard" {
                     return Err(MarkitdownError::InvalidFile(format!(
                         "Expected .vcf file, got {}",
                         ext
