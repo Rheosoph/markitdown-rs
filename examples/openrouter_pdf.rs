@@ -17,7 +17,7 @@
 
 use markitdown::table_merge;
 use markitdown::{create_llm_client_with_config, ConversionOptions, LlmConfig, MarkItDown};
-use rig::client::CompletionClient;
+use rig::client::{CompletionClient, ProviderClient};
 use rig::providers::openrouter;
 
 const TEST_PDF: &str = "tests/test_files/BMW.pdf";
@@ -79,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // First, let's check actual page count with hayro
     let bytes = std::fs::read(TEST_PDF)?;
     let data: std::sync::Arc<dyn AsRef<[u8]> + Send + Sync> = std::sync::Arc::new(bytes.clone());
-    if let Ok(pdf) = hayro::Pdf::new(data) {
+    if let Ok(pdf) = hayro_syntax::Pdf::new(data) {
         println!("PDF parsed with hayro: {} pages", pdf.pages().len());
     }
 

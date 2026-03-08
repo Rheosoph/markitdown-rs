@@ -53,25 +53,26 @@ impl OpmlConverter {
                             let mut url = String::new();
                             let mut outline_type = String::new();
 
+                            let decoder = reader.decoder();
                             for attr in e.attributes().flatten() {
                                 match attr.key.as_ref() {
                                     b"text" => {
                                         text = attr
-                                            .unescape_value()
+                                            .decode_and_unescape_value(decoder)
                                             .map(|s| s.to_string())
                                             .unwrap_or_default();
                                     }
                                     b"xmlUrl" | b"htmlUrl" | b"url" => {
                                         if url.is_empty() {
                                             url = attr
-                                                .unescape_value()
+                                                .decode_and_unescape_value(decoder)
                                                 .map(|s| s.to_string())
                                                 .unwrap_or_default();
                                         }
                                     }
                                     b"type" => {
                                         outline_type = attr
-                                            .unescape_value()
+                                            .decode_and_unescape_value(decoder)
                                             .map(|s| s.to_string())
                                             .unwrap_or_default();
                                     }

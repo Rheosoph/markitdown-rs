@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use markitdown::{create_llm_client, ConversionOptions, MarkItDown};
 use rig::client::CompletionClient;
-use rig::providers::{azure, gemini, openai, openrouter};
+use rig::providers::{azure, azure::AzureOpenAIAuth, gemini, openai, openrouter};
 use std::env;
 
 /// Test image file - a real PNG image from a scientific paper
@@ -71,9 +71,11 @@ async fn test_openrouter_image_description() {
         model_name
     );
 
-    let client = openrouter::Client::builder(&api_key)
+    let client: openrouter::Client = openrouter::Client::builder()
+        .api_key(api_key)
         .base_url(endpoint.as_str())
-        .build();
+        .build()
+        .expect("Failed to build OpenRouter client");
 
     let model = client.completion_model(&model_name);
     let llm_client = create_llm_client(model);
@@ -128,9 +130,11 @@ async fn test_openrouter_text_completion() {
         model_name
     );
 
-    let client = openrouter::Client::builder(&api_key)
+    let client: openrouter::Client = openrouter::Client::builder()
+        .api_key(api_key)
         .base_url(endpoint.as_str())
-        .build();
+        .build()
+        .expect("Failed to build OpenRouter client");
 
     let model = client.completion_model(&model_name);
     let llm_client = create_llm_client(model);
@@ -179,10 +183,13 @@ async fn test_azure_openai_text_completion() {
         endpoint, model_id, api_version
     );
 
-    // Build Azure client - api_key is Into<AzureOpenAIAuth>, endpoint and api_version are &str
-    let client = azure::Client::builder(api_key, &endpoint)
+    // Build Azure client
+    let client: azure::Client = azure::Client::builder()
+        .api_key(AzureOpenAIAuth::ApiKey(api_key))
+        .base_url(&endpoint)
         .api_version(&api_version)
-        .build();
+        .build()
+        .expect("Failed to build Azure client");
 
     let model = client.completion_model(&model_id);
     let llm_client = create_llm_client(model);
@@ -228,9 +235,12 @@ async fn test_azure_openai_image_description() {
         endpoint, model_id, api_version
     );
 
-    let client = azure::Client::builder(api_key, &endpoint)
+    let client: azure::Client = azure::Client::builder()
+        .api_key(AzureOpenAIAuth::ApiKey(api_key))
+        .base_url(&endpoint)
         .api_version(&api_version)
-        .build();
+        .build()
+        .expect("Failed to build Azure client");
 
     let model = client.completion_model(&model_id);
     let llm_client = create_llm_client(model);
@@ -288,9 +298,12 @@ async fn test_azure_openai_pdf_conversion() {
         endpoint, model_id, api_version
     );
 
-    let client = azure::Client::builder(api_key, &endpoint)
+    let client: azure::Client = azure::Client::builder()
+        .api_key(AzureOpenAIAuth::ApiKey(api_key))
+        .base_url(&endpoint)
         .api_version(&api_version)
-        .build();
+        .build()
+        .expect("Failed to build Azure client");
 
     let model = client.completion_model(&model_id);
     let llm_client = create_llm_client(model);
@@ -350,7 +363,7 @@ async fn test_gemini_text_completion() {
         model_name
     );
 
-    let client = gemini::Client::new(&api_key);
+    let client: gemini::Client = gemini::Client::new(&api_key).expect("Failed to create Gemini client");
     let model = client.completion_model(&model_name);
     let llm_client = create_llm_client(model);
 
@@ -387,7 +400,7 @@ async fn test_gemini_image_description() {
         model_name
     );
 
-    let client = gemini::Client::new(&api_key);
+    let client: gemini::Client = gemini::Client::new(&api_key).expect("Failed to create Gemini client");
     let model = client.completion_model(&model_name);
     let llm_client = create_llm_client(model);
 
@@ -439,7 +452,7 @@ async fn test_gemini_pdf_conversion() {
         model_name
     );
 
-    let client = gemini::Client::new(&api_key);
+    let client = gemini::Client::new(&api_key).expect("Failed to create Gemini client");
     let model = client.completion_model(&model_name);
     let llm_client = create_llm_client(model);
 
@@ -497,7 +510,7 @@ async fn test_openai_text_completion() {
         model_name
     );
 
-    let client = openai::Client::new(&api_key);
+    let client: openai::Client = openai::Client::new(&api_key).expect("Failed to create OpenAI client");
     let model = client.completion_model(&model_name);
     let llm_client = create_llm_client(model);
 
@@ -534,7 +547,7 @@ async fn test_openai_image_description() {
         model_name
     );
 
-    let client = openai::Client::new(&api_key);
+    let client: openai::Client = openai::Client::new(&api_key).expect("Failed to create OpenAI client");
     let model = client.completion_model(&model_name);
     let llm_client = create_llm_client(model);
 
@@ -586,7 +599,7 @@ async fn test_openai_pdf_conversion() {
         model_name
     );
 
-    let client = openai::Client::new(&api_key);
+    let client: openai::Client = openai::Client::new(&api_key).expect("Failed to create OpenAI client");
     let model = client.completion_model(&model_name);
     let llm_client = create_llm_client(model);
 
@@ -653,9 +666,11 @@ async fn test_llm_integration() {
         format!("{}/v1", endpoint)
     };
 
-    let client = openrouter::Client::builder(&api_key)
+    let client: openrouter::Client = openrouter::Client::builder()
+        .api_key(api_key)
         .base_url(endpoint.as_str())
-        .build();
+        .build()
+        .expect("Failed to build OpenRouter client");
 
     let model = client.completion_model(&model_name);
     let llm_client = create_llm_client(model);
@@ -832,9 +847,12 @@ async fn test_azure_pptx_with_images() {
         endpoint, model_id
     );
 
-    let client = azure::Client::builder(api_key, &endpoint)
+    let client: azure::Client = azure::Client::builder()
+        .api_key(AzureOpenAIAuth::ApiKey(api_key))
+        .base_url(&endpoint)
         .api_version(&api_version)
-        .build();
+        .build()
+        .expect("Failed to build Azure client");
 
     let model = client.completion_model(&model_id);
     let llm_client = create_llm_client(model);
@@ -904,9 +922,12 @@ async fn test_azure_pitch_deck_pptx() {
         endpoint, model_id
     );
 
-    let client = azure::Client::builder(api_key, &endpoint)
+    let client: azure::Client = azure::Client::builder()
+        .api_key(AzureOpenAIAuth::ApiKey(api_key))
+        .base_url(&endpoint)
         .api_version(&api_version)
-        .build();
+        .build()
+        .expect("Failed to build Azure client");
 
     let model = client.completion_model(&model_id);
     let llm_client = create_llm_client(model);

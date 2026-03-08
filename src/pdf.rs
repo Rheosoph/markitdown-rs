@@ -11,9 +11,11 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use hayro::{render, InterpreterSettings, Pdf, RenderSettings};
+use hayro::{render, RenderSettings};
+use hayro::hayro_interpret::InterpreterSettings;
 use hayro_syntax::object::dict::keys::{HEIGHT, SUBTYPE, WIDTH};
 use hayro_syntax::object::{Name, Stream};
+use hayro_syntax::Pdf;
 use object_store::ObjectStore;
 use pdf_extract;
 use std::panic;
@@ -261,8 +263,10 @@ impl PdfConverter {
 
         let pixmap = render(page, &interpreter_settings, &render_settings);
 
-        // Encode as PNG (take_png consumes the pixmap)
-        let png_data = pixmap.take_png();
+        // Encode as PNG (into_png consumes the pixmap)
+        let png_data = pixmap
+            .into_png()
+            .map_err(|e| MarkitdownError::ParseError(format!("Failed to encode PDF page as PNG: {:?}", e)))?;
 
         Ok(png_data)
     }

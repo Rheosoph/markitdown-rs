@@ -8,7 +8,7 @@
 //! - GEMINI_API_KEY for Google Gemini
 
 use markitdown::{create_llm_client, create_llm_client_with_config, LlmConfig, MarkItDown};
-use rig::client::CompletionClient;
+use rig::client::{CompletionClient, ProviderClient};
 use rig::providers::{anthropic, gemini, openai};
 use std::sync::Arc;
 

@@ -63,10 +63,11 @@ impl DocBookConverter {
                         b"emphasis" => {
                             in_emphasis = true;
                             // Check for role attribute
+                            let decoder = reader.decoder();
                             for attr in e.attributes().flatten() {
                                 if attr.key.as_ref() == b"role" {
                                     emphasis_role = attr
-                                        .unescape_value()
+                                        .decode_and_unescape_value(decoder)
                                         .map(|s| s.to_string())
                                         .unwrap_or_default();
                                 }
@@ -77,13 +78,14 @@ impl DocBookConverter {
                         }
                         b"link" | b"ulink" | b"xref" => {
                             in_link = true;
+                            let decoder = reader.decoder();
                             for attr in e.attributes().flatten() {
                                 if attr.key.as_ref() == b"url"
                                     || attr.key.as_ref() == b"xlink:href"
                                     || attr.key.as_ref() == b"linkend"
                                 {
                                     link_url = attr
-                                        .unescape_value()
+                                        .decode_and_unescape_value(decoder)
                                         .map(|s| s.to_string())
                                         .unwrap_or_default();
                                 }
