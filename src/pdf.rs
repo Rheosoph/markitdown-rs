@@ -625,10 +625,8 @@ impl PdfConverter {
         let page_texts = if actual_page_count > 0 {
             Self::extract_text_aligned_to_pages(bytes, actual_page_count)
         } else {
-            let text_content = pdf_extract::extract_text_from_mem(bytes).map_err(|e| {
-                MarkitdownError::ParseError(format!("Failed to extract text from PDF: {}", e))
-            })?;
-            text_content.split('\x0c').map(|s| s.to_string()).collect()
+            // Use catch_unwind to guard against panics in pdf-extract on malformed PDFs
+            Self::extract_text_by_page(bytes).unwrap_or_default()
         };
 
         let mut document = Document::new();
