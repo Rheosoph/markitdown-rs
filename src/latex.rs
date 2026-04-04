@@ -33,7 +33,6 @@ impl LatexConverter {
         let mut in_document = false;
         let mut in_math_env = false;
         let mut in_verbatim = false;
-        let mut in_itemize = false;
         let mut in_enumerate = false;
         let mut enum_counter = 0;
 
@@ -109,11 +108,9 @@ impl LatexConverter {
 
             // Handle lists
             if trimmed.starts_with("\\begin{itemize}") {
-                in_itemize = true;
                 continue;
             }
             if trimmed.starts_with("\\end{itemize}") {
-                in_itemize = false;
                 result.push('\n');
                 continue;
             }

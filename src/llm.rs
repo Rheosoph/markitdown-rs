@@ -25,7 +25,7 @@ use futures::FutureExt;
 use image::ImageFormat;
 use rig::{
     completion::{AssistantContent, CompletionModel, CompletionRequest, CompletionRequestBuilder},
-    message::{ImageDetail, ImageMediaType, Message, UserContent},
+    message::{ImageDetail, ImageMediaType, Message, ReasoningContent, UserContent},
     OneOrMany,
 };
 use std::io::Cursor;
@@ -474,7 +474,26 @@ fn extract_text_from_response(content: &OneOrMany<AssistantContent>) -> String {
         .iter()
         .filter_map(|c| match c {
             AssistantContent::Text(text) => Some(text.text.clone()),
-            AssistantContent::Reasoning(r) => Some(r.reasoning.join("\n")),
+            AssistantContent::Reasoning(reasoning) => {
+                let text = reasoning
+                    .content
+                    .iter()
+                    .filter_map(|item| match item {
+                        ReasoningContent::Text { text, .. } => Some(text.as_str()),
+                        ReasoningContent::Summary(summary) => Some(summary.as_str()),
+                        ReasoningContent::Encrypted(_) => None,
+                        ReasoningContent::Redacted { .. } => None,
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                if text.is_empty() {
+                    None
+                } else {
+                    Some(text)
+                }
+            }
             AssistantContent::ToolCall(_) => None,
             AssistantContent::Image(_) => None,
         })

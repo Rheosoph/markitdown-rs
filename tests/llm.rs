@@ -22,6 +22,36 @@ fn load_test_image() -> Vec<u8> {
     std::fs::read(TEST_IMAGE_PATH).expect("Failed to load test image")
 }
 
+fn azure_deployment_id() -> Result<String, env::VarError> {
+    env::var("AZURE_DEPLOYMENT_ID").or_else(|_| env::var("AZURE_MODEL_ID"))
+}
+
+fn azure_build_client(api_key: String, endpoint: String, api_version: &str) -> azure::Client {
+    azure::Client::builder()
+        .api_key(AzureOpenAIAuth::ApiKey(api_key))
+        .azure_endpoint(endpoint)
+        .api_version(api_version)
+        .build()
+        .expect("Failed to build Azure client")
+}
+
+fn should_skip_missing_azure_deployment(
+    test_name: &str,
+    deployment_id: &str,
+    error: &impl std::fmt::Display,
+) -> bool {
+    let message = error.to_string();
+    if message.contains("DeploymentNotFound") {
+        println!(
+            "Skipping {}: Azure deployment '{}' was not found. Set AZURE_DEPLOYMENT_ID to a valid Azure deployment name.",
+            test_name, deployment_id
+        );
+        true
+    } else {
+        false
+    }
+}
+
 // ============================================================================
 // OpenRouter Tests
 // ============================================================================
@@ -163,12 +193,12 @@ async fn test_azure_openai_text_completion() {
     let api_key = env::var("AZURE_API_KEY");
     let endpoint = env::var("AZURE_ENDPOINT");
     let api_version = env::var("AZURE_API_VERSION").or_else(|_| env::var("AZURE_VERSION"));
-    let model_id = env::var("AZURE_MODEL_ID");
+    let deployment_id = azure_deployment_id();
 
-    if api_key.is_err() || endpoint.is_err() || api_version.is_err() || model_id.is_err() {
+    if api_key.is_err() || endpoint.is_err() || api_version.is_err() || deployment_id.is_err() {
         println!(
             "Skipping Azure OpenAI text completion test: Missing environment variables.\n\
-             Required: AZURE_API_KEY, AZURE_ENDPOINT, AZURE_API_VERSION (or AZURE_VERSION), AZURE_MODEL_ID"
+             Required: AZURE_API_KEY, AZURE_ENDPOINT, AZURE_API_VERSION (or AZURE_VERSION), AZURE_DEPLOYMENT_ID or AZURE_MODEL_ID"
         );
         return;
     }
@@ -176,22 +206,17 @@ async fn test_azure_openai_text_completion() {
     let api_key = api_key.unwrap();
     let endpoint = endpoint.unwrap();
     let api_version = api_version.unwrap();
-    let model_id = model_id.unwrap();
+    let deployment_id = deployment_id.unwrap();
 
     println!(
-        "Running Azure OpenAI text completion test:\n  endpoint: {}\n  model: {}\n  api_version: {}",
-        endpoint, model_id, api_version
+        "Running Azure OpenAI text completion test:\n  endpoint: {}\n  deployment: {}\n  api_version: {}",
+        endpoint, deployment_id, api_version
     );
 
     // Build Azure client
-    let client: azure::Client = azure::Client::builder()
-        .api_key(AzureOpenAIAuth::ApiKey(api_key))
-        .base_url(&endpoint)
-        .api_version(&api_version)
-        .build()
-        .expect("Failed to build Azure client");
+    let client = azure_build_client(api_key, endpoint, &api_version);
 
-    let model = client.completion_model(&model_id);
+    let model = client.completion_model(&deployment_id);
     let llm_client = create_llm_client(model);
 
     println!("Sending text completion request to Azure OpenAI...");
@@ -205,6 +230,13 @@ async fn test_azure_openai_text_completion() {
             assert!(!response.is_empty(), "Response should not be empty");
         }
         Err(e) => {
+            if should_skip_missing_azure_deployment(
+                "Azure OpenAI text completion test",
+                &deployment_id,
+                &e,
+            ) {
+                return;
+            }
             eprintln!("Azure OpenAI text completion test failed: {}", e);
             panic!("Azure OpenAI text completion test failed: {}", e);
         }
@@ -218,9 +250,9 @@ async fn test_azure_openai_image_description() {
     let api_key = env::var("AZURE_API_KEY");
     let endpoint = env::var("AZURE_ENDPOINT");
     let api_version = env::var("AZURE_API_VERSION").or_else(|_| env::var("AZURE_VERSION"));
-    let model_id = env::var("AZURE_MODEL_ID");
+    let deployment_id = azure_deployment_id();
 
-    if api_key.is_err() || endpoint.is_err() || api_version.is_err() || model_id.is_err() {
+    if api_key.is_err() || endpoint.is_err() || api_version.is_err() || deployment_id.is_err() {
         println!("Skipping Azure OpenAI image description test: Missing environment variables");
         return;
     }
@@ -228,21 +260,16 @@ async fn test_azure_openai_image_description() {
     let api_key = api_key.unwrap();
     let endpoint = endpoint.unwrap();
     let api_version = api_version.unwrap();
-    let model_id = model_id.unwrap();
+    let deployment_id = deployment_id.unwrap();
 
     println!(
-        "Running Azure OpenAI image description test:\n  endpoint: {}\n  model: {}\n  api_version: {}",
-        endpoint, model_id, api_version
+        "Running Azure OpenAI image description test:\n  endpoint: {}\n  deployment: {}\n  api_version: {}",
+        endpoint, deployment_id, api_version
     );
 
-    let client: azure::Client = azure::Client::builder()
-        .api_key(AzureOpenAIAuth::ApiKey(api_key))
-        .base_url(&endpoint)
-        .api_version(&api_version)
-        .build()
-        .expect("Failed to build Azure client");
+    let client = azure_build_client(api_key, endpoint, &api_version);
 
-    let model = client.completion_model(&model_id);
+    let model = client.completion_model(&deployment_id);
     let llm_client = create_llm_client(model);
 
     let image_data = load_test_image();
@@ -261,11 +288,18 @@ async fn test_azure_openai_image_description() {
             assert!(!description.is_empty(), "Description should not be empty");
         }
         Err(e) => {
+            if should_skip_missing_azure_deployment(
+                "Azure OpenAI image description test",
+                &deployment_id,
+                &e,
+            ) {
+                return;
+            }
             eprintln!("Azure OpenAI image description test failed: {}", e);
             eprintln!("This may be due to:");
             eprintln!(
-                "  1. The model '{}' doesn't support vision/image inputs",
-                model_id
+                "  1. The Azure deployment '{}' doesn't support vision/image inputs",
+                deployment_id
             );
             eprintln!("  2. API quota/limits exceeded");
             eprintln!("  3. Invalid API key or endpoint");
@@ -281,9 +315,9 @@ async fn test_azure_openai_pdf_conversion() {
     let api_key = env::var("AZURE_API_KEY");
     let endpoint = env::var("AZURE_ENDPOINT");
     let api_version = env::var("AZURE_API_VERSION").or_else(|_| env::var("AZURE_VERSION"));
-    let model_id = env::var("AZURE_MODEL_ID");
+    let deployment_id = azure_deployment_id();
 
-    if api_key.is_err() || endpoint.is_err() || api_version.is_err() || model_id.is_err() {
+    if api_key.is_err() || endpoint.is_err() || api_version.is_err() || deployment_id.is_err() {
         println!("Skipping Azure OpenAI PDF conversion test: Missing environment variables");
         return;
     }
@@ -291,21 +325,16 @@ async fn test_azure_openai_pdf_conversion() {
     let api_key = api_key.unwrap();
     let endpoint = endpoint.unwrap();
     let api_version = api_version.unwrap();
-    let model_id = model_id.unwrap();
+    let deployment_id = deployment_id.unwrap();
 
     println!(
-        "Running Azure OpenAI PDF conversion test:\n  endpoint: {}\n  model: {}\n  api_version: {}",
-        endpoint, model_id, api_version
+        "Running Azure OpenAI PDF conversion test:\n  endpoint: {}\n  deployment: {}\n  api_version: {}",
+        endpoint, deployment_id, api_version
     );
 
-    let client: azure::Client = azure::Client::builder()
-        .api_key(AzureOpenAIAuth::ApiKey(api_key))
-        .base_url(&endpoint)
-        .api_version(&api_version)
-        .build()
-        .expect("Failed to build Azure client");
+    let client = azure_build_client(api_key, endpoint, &api_version);
 
-    let model = client.completion_model(&model_id);
+    let model = client.completion_model(&deployment_id);
     let llm_client = create_llm_client(model);
 
     // Load PDF and convert with LLM support
@@ -334,6 +363,13 @@ async fn test_azure_openai_pdf_conversion() {
             assert!(!markdown.is_empty(), "Markdown should not be empty");
         }
         Err(e) => {
+            if should_skip_missing_azure_deployment(
+                "Azure OpenAI PDF conversion test",
+                &deployment_id,
+                &e,
+            ) {
+                return;
+            }
             eprintln!("Azure OpenAI PDF conversion test failed: {}", e);
             panic!("Azure OpenAI PDF conversion test failed: {}", e);
         }
@@ -363,7 +399,8 @@ async fn test_gemini_text_completion() {
         model_name
     );
 
-    let client: gemini::Client = gemini::Client::new(&api_key).expect("Failed to create Gemini client");
+    let client: gemini::Client =
+        gemini::Client::new(&api_key).expect("Failed to create Gemini client");
     let model = client.completion_model(&model_name);
     let llm_client = create_llm_client(model);
 
@@ -400,7 +437,8 @@ async fn test_gemini_image_description() {
         model_name
     );
 
-    let client: gemini::Client = gemini::Client::new(&api_key).expect("Failed to create Gemini client");
+    let client: gemini::Client =
+        gemini::Client::new(&api_key).expect("Failed to create Gemini client");
     let model = client.completion_model(&model_name);
     let llm_client = create_llm_client(model);
 
@@ -510,7 +548,8 @@ async fn test_openai_text_completion() {
         model_name
     );
 
-    let client: openai::Client = openai::Client::new(&api_key).expect("Failed to create OpenAI client");
+    let client: openai::Client =
+        openai::Client::new(&api_key).expect("Failed to create OpenAI client");
     let model = client.completion_model(&model_name);
     let llm_client = create_llm_client(model);
 
@@ -547,7 +586,8 @@ async fn test_openai_image_description() {
         model_name
     );
 
-    let client: openai::Client = openai::Client::new(&api_key).expect("Failed to create OpenAI client");
+    let client: openai::Client =
+        openai::Client::new(&api_key).expect("Failed to create OpenAI client");
     let model = client.completion_model(&model_name);
     let llm_client = create_llm_client(model);
 
@@ -599,7 +639,8 @@ async fn test_openai_pdf_conversion() {
         model_name
     );
 
-    let client: openai::Client = openai::Client::new(&api_key).expect("Failed to create OpenAI client");
+    let client: openai::Client =
+        openai::Client::new(&api_key).expect("Failed to create OpenAI client");
     let model = client.completion_model(&model_name);
     let llm_client = create_llm_client(model);
 
@@ -830,9 +871,9 @@ async fn test_azure_pptx_with_images() {
     let api_key = env::var("AZURE_API_KEY");
     let endpoint = env::var("AZURE_ENDPOINT");
     let api_version = env::var("AZURE_API_VERSION").or_else(|_| env::var("AZURE_VERSION"));
-    let model_id = env::var("AZURE_MODEL_ID");
+    let deployment_id = azure_deployment_id();
 
-    if api_key.is_err() || endpoint.is_err() || api_version.is_err() || model_id.is_err() {
+    if api_key.is_err() || endpoint.is_err() || api_version.is_err() || deployment_id.is_err() {
         println!("Skipping Azure PPTX image test: Missing environment variables");
         return;
     }
@@ -840,21 +881,16 @@ async fn test_azure_pptx_with_images() {
     let api_key = api_key.unwrap();
     let endpoint = endpoint.unwrap();
     let api_version = api_version.unwrap();
-    let model_id = model_id.unwrap();
+    let deployment_id = deployment_id.unwrap();
 
     println!(
-        "Running Azure PPTX with images test:\n  endpoint: {}\n  model: {}",
-        endpoint, model_id
+        "Running Azure PPTX with images test:\n  endpoint: {}\n  deployment: {}",
+        endpoint, deployment_id
     );
 
-    let client: azure::Client = azure::Client::builder()
-        .api_key(AzureOpenAIAuth::ApiKey(api_key))
-        .base_url(&endpoint)
-        .api_version(&api_version)
-        .build()
-        .expect("Failed to build Azure client");
+    let client = azure_build_client(api_key, endpoint, &api_version);
 
-    let model = client.completion_model(&model_id);
+    let model = client.completion_model(&deployment_id);
     let llm_client = create_llm_client(model);
 
     // Test powerpoint_with_image.pptx
@@ -891,6 +927,13 @@ async fn test_azure_pptx_with_images() {
             );
         }
         Err(e) => {
+            if should_skip_missing_azure_deployment(
+                "Azure PPTX with images test",
+                &deployment_id,
+                &e,
+            ) {
+                return;
+            }
             eprintln!("PPTX conversion failed: {}", e);
             panic!("PPTX conversion failed: {}", e);
         }
@@ -905,9 +948,9 @@ async fn test_azure_pitch_deck_pptx() {
     let api_key = env::var("AZURE_API_KEY");
     let endpoint = env::var("AZURE_ENDPOINT");
     let api_version = env::var("AZURE_API_VERSION").or_else(|_| env::var("AZURE_VERSION"));
-    let model_id = env::var("AZURE_MODEL_ID");
+    let deployment_id = azure_deployment_id();
 
-    if api_key.is_err() || endpoint.is_err() || api_version.is_err() || model_id.is_err() {
+    if api_key.is_err() || endpoint.is_err() || api_version.is_err() || deployment_id.is_err() {
         println!("Skipping Azure pitch deck PPTX test: Missing environment variables");
         return;
     }
@@ -915,21 +958,16 @@ async fn test_azure_pitch_deck_pptx() {
     let api_key = api_key.unwrap();
     let endpoint = endpoint.unwrap();
     let api_version = api_version.unwrap();
-    let model_id = model_id.unwrap();
+    let deployment_id = deployment_id.unwrap();
 
     println!(
-        "Running Azure pitch deck PPTX test:\n  endpoint: {}\n  model: {}",
-        endpoint, model_id
+        "Running Azure pitch deck PPTX test:\n  endpoint: {}\n  deployment: {}",
+        endpoint, deployment_id
     );
 
-    let client: azure::Client = azure::Client::builder()
-        .api_key(AzureOpenAIAuth::ApiKey(api_key))
-        .base_url(&endpoint)
-        .api_version(&api_version)
-        .build()
-        .expect("Failed to build Azure client");
+    let client = azure_build_client(api_key, endpoint, &api_version);
 
-    let model = client.completion_model(&model_id);
+    let model = client.completion_model(&deployment_id);
     let llm_client = create_llm_client(model);
 
     // Test pitch_deck_presentation.pptx
@@ -973,6 +1011,13 @@ async fn test_azure_pitch_deck_pptx() {
             );
         }
         Err(e) => {
+            if should_skip_missing_azure_deployment(
+                "Azure pitch deck PPTX test",
+                &deployment_id,
+                &e,
+            ) {
+                return;
+            }
             eprintln!("Pitch deck PPTX conversion failed: {}", e);
             panic!("Pitch deck PPTX conversion failed: {}", e);
         }

@@ -230,7 +230,6 @@ async fn test_pdf_page_structure() {
 
     // Each page should have content
     for page in &doc.pages {
-        let content = page.to_markdown();
         // Pages can be empty or have content, but structure should exist
         assert!(page.page_number > 0, "Page numbers should be positive");
     }

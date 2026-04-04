@@ -9,7 +9,6 @@ use markitdown::{ConversionOptions, MarkItDown};
 // TAR tests (create minimal in-memory test)
 #[tokio::test]
 async fn test_tar_bytes_conversion() {
-    use std::io::Write;
     use tar::Builder;
 
     let md = MarkItDown::new();

@@ -11,8 +11,8 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use hayro::{render, RenderSettings};
 use hayro::hayro_interpret::InterpreterSettings;
+use hayro::{render, RenderSettings};
 use hayro_syntax::object::dict::keys::{HEIGHT, SUBTYPE, WIDTH};
 use hayro_syntax::object::{Name, Stream};
 use hayro_syntax::Pdf;
@@ -264,9 +264,9 @@ impl PdfConverter {
         let pixmap = render(page, &interpreter_settings, &render_settings);
 
         // Encode as PNG (into_png consumes the pixmap)
-        let png_data = pixmap
-            .into_png()
-            .map_err(|e| MarkitdownError::ParseError(format!("Failed to encode PDF page as PNG: {:?}", e)))?;
+        let png_data = pixmap.into_png().map_err(|e| {
+            MarkitdownError::ParseError(format!("Failed to encode PDF page as PNG: {:?}", e))
+        })?;
 
         Ok(png_data)
     }
@@ -282,17 +282,17 @@ impl PdfConverter {
     /// Uses catch_unwind to handle panics from pdf-extract on malformed PDFs.
     fn extract_text_by_page(bytes: &[u8]) -> Result<Vec<String>, MarkitdownError> {
         let bytes_owned = bytes.to_vec();
-        let text_content = panic::catch_unwind(move || {
-            pdf_extract::extract_text_from_mem(&bytes_owned)
-        })
-        .map_err(|_| {
-            MarkitdownError::ParseError(
-                "PDF text extraction panicked (likely malformed content stream)".to_string(),
-            )
-        })?
-        .map_err(|e| {
-            MarkitdownError::ParseError(format!("Failed to extract text from PDF: {}", e))
-        })?;
+        let text_content =
+            panic::catch_unwind(move || pdf_extract::extract_text_from_mem(&bytes_owned))
+                .map_err(|_| {
+                    MarkitdownError::ParseError(
+                        "PDF text extraction panicked (likely malformed content stream)"
+                            .to_string(),
+                    )
+                })?
+                .map_err(|e| {
+                    MarkitdownError::ParseError(format!("Failed to extract text from PDF: {}", e))
+                })?;
 
         // Split by form feed (page separator)
         let pages: Vec<String> = text_content.split('\x0c').map(|s| s.to_string()).collect();
@@ -652,13 +652,12 @@ impl PdfConverter {
         } else if document.pages.is_empty() {
             // Fallback: single page with all text
             let bytes_owned = bytes.to_vec();
-            let text_content = panic::catch_unwind(move || {
-                pdf_extract::extract_text_from_mem(&bytes_owned)
-            })
-            .ok()
-            .and_then(|r| r.ok())
-            .map(|t| t.trim().to_string())
-            .unwrap_or_default();
+            let text_content =
+                panic::catch_unwind(move || pdf_extract::extract_text_from_mem(&bytes_owned))
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .map(|t| t.trim().to_string())
+                    .unwrap_or_default();
             let mut page = Page::new(1);
             if text_content.is_empty() {
                 page.add_content(ContentBlock::Text(

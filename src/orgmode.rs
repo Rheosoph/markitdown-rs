@@ -34,7 +34,6 @@ impl OrgModeConverter {
         // Process line by line
         let lines: Vec<&str> = content.lines().collect();
         let mut in_code_block = false;
-        let mut code_lang = String::new();
 
         for line in lines {
             // Handle code blocks
@@ -42,7 +41,7 @@ impl OrgModeConverter {
                 in_code_block = true;
                 // Extract language if present
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                code_lang = parts.get(1).unwrap_or(&"").to_string();
+                let code_lang = parts.get(1).copied().unwrap_or("");
                 result.push_str(&format!("```{}\n", code_lang));
                 continue;
             }
