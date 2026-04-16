@@ -141,12 +141,17 @@ markitdown = { version = "0.1.10", features = ["native-tls"] }
 
 # Pure-Rust TLS via rustls (no system OpenSSL needed)
 markitdown = { version = "0.1.10", default-features = false, features = ["rustls-tls"] }
+
+# Force a vendored static liblzma build for XZ/LZMA archive support
+markitdown = { version = "0.1.10", features = ["native-tls", "static-liblzma"] }
 ```
 
 | Feature | TLS Backend | System dependency |
 |---|---|---|
 | `native-tls` *(default)* | OS-native (Security.framework / SChannel / OpenSSL) | OpenSSL on Linux |
 | `rustls-tls` | rustls (pure Rust) | None |
+
+`static-liblzma` is an optional build feature for archive support. It forces `liblzma` to build from bundled sources instead of using a system `liblzma`, which is useful for reproducible CI builds and mobile or cross-compiled targets.
 
 #### Initialize MarkItDown
 
@@ -389,7 +394,7 @@ This structure is ideal for:
 - **Additional formats**: EPUB, vCard, iCalendar, BibTeX, log files, SQLite databases, email files
 
 ### Performance & Reliability
-- **Static compilation** for compression libraries (bzip2, xz2) for better portability
+- **Improved archive portability** by keeping compression support compatible with shared native `lzma` dependencies
 - **Improved file detection** - prioritizes file extension over magic byte detection for legacy formats
 - **Template support** for Office formats (.dotx, .potx, .xltx)
 - **LLM flexibility** - works with any rig-core compatible model (OpenAI, Gemini, Claude, Cohere, custom providers)

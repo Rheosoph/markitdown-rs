@@ -27,6 +27,10 @@ native-tls = ["rig-core/native-tls"]
 # This is recommended for cross-compilation and reproducible builds.
 rustls-tls = ["rig-core/rustls"]
 
+# Force a vendored static liblzma build for XZ/LZMA support.
+# Useful for reproducible builds and cross-compilation targets where no target liblzma is available.
+static-liblzma = ["liblzma/static"]
+
 [dependencies]
 calamine = { version = "0.34.0", default-features = false, features = ["dates"] }
 clap = { version = "4.5.60", features = ["derive"] }
@@ -68,11 +72,11 @@ toml = "0.9.8"
 icalendar = "0.17.4"
 vcard_parser = "0.2.2"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"], default-features = false }
-# Archive formats (static compilation for portability)
+# Archive formats
 tar = "0.4"
 flate2 = { version = "1.1.9", default-features = true }
 bzip2 = "0.6.1"
-xz2 = { version = "0.1", features = ["static"] }
+liblzma = "0.4"
 zstd = "0.13"
 sevenz-rust = "0.6"
 cfb = "0.14.0"

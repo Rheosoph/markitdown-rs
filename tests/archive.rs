@@ -180,7 +180,7 @@ async fn test_bzip2_bytes_conversion() {
 #[tokio::test]
 async fn test_xz_bytes_conversion() {
     use std::io::Write;
-    use xz2::write::XzEncoder;
+    use liblzma::write::XzEncoder;
 
     let md = MarkItDown::new();
 
