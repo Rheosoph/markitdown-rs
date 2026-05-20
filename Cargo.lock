@@ -3104,7 +3104,7 @@ dependencies = [
 [[package]]
 name = "rbook"
 version = "0.6.9"
-source = "git+https://github.com/TM9657/rbook.git?branch=master#9df02c833a1f60cfeedc00a52e22c0a813b143e2"
+source = "git+https://github.com/Rheosoph/rbook.git?branch=master#9df02c833a1f60cfeedc00a52e22c0a813b143e2"
 dependencies = [
  "percent-encoding",
  "quick-xml 0.38.4",

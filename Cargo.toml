@@ -3,7 +3,7 @@ name = "markitdown"
 version = "0.2.0"
 edition = "2021"
 description = "A Rust library designed to facilitate the conversion of various document formats into markdown text with ObjectStore and LLM support."
-repository = "https://github.com/TM9657/markitdown-rs"
+repository = "https://github.com/Rheosoph/markitdown-rs"
 license = "MIT"
 
 [features]
@@ -65,7 +65,7 @@ thiserror = "2.0"
 hayro = {version="0.5.0", features = ["embed-fonts"]}
 hayro-syntax = "0.5.0"
 rtf-parser = "0.4.2"
-rbook = {git = "https://github.com/TM9657/rbook.git", branch = "master"}
+rbook = {git = "https://github.com/Rheosoph/rbook.git", branch = "master"}
 mail-parser = "0.11.2"
 serde_yaml = "0.9.33"
 toml = "0.9.8"

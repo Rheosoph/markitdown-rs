@@ -20,7 +20,7 @@ Thank you for your interest in contributing to markitdown-rs! This guide will he
    ```
 3. Add upstream remote:
    ```bash
-   git remote add upstream https://github.com/TM9657/markitdown-rs.git
+   git remote add upstream https://github.com/Rheosoph/markitdown-rs.git
    ```
 
 ### Building
