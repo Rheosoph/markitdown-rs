@@ -41,7 +41,7 @@ infer = "0.19"
 image = { version = "0.25", default-features = false, features = ["bmp", "tiff", "png", "jpeg", "gif", "webp"] }
 mime_guess = "2.0.5"
 docx-rust = "0.1.10"
-pdf-extract = "0.10.0"
+liteparse = { git = "https://github.com/Rheosoph/liteparse-hayro", branch = "main", default-features = false }
 regex = "1"
 serde = { version = "1", features = ["derive", "rc"] }
 quick-xml = "^0.39.2"

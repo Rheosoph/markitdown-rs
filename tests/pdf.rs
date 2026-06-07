@@ -1,6 +1,7 @@
 //! PDF conversion tests using kreuzberg test documents
 use bytes::Bytes;
-use markitdown::{model::ConversionOptions, MarkItDown};
+use markitdown::{model::ConversionOptions, MarkItDown, MockLlmClient};
+use std::sync::Arc;
 
 fn default_options(ext: &str) -> ConversionOptions {
     ConversionOptions {
@@ -128,10 +129,7 @@ async fn test_pdf_code_and_formula() {
     assert!(!content.is_empty(), "Content should not be empty");
 }
 
-// This test is ignored because the PDF file causes a panic in the pdf-extract library
-// (index out of bounds in lib.rs:1802). This is a third-party library bug.
 #[tokio::test]
-#[ignore = "PDF causes panic in pdf-extract library - third-party bug"]
 async fn test_pdf_deep_learning() {
     let markitdown = MarkItDown::new();
     let result = markitdown
@@ -145,6 +143,32 @@ async fn test_pdf_deep_learning() {
     let doc = result.unwrap();
     let content = doc.to_markdown();
     assert!(!content.is_empty(), "Content should not be empty");
+}
+
+#[tokio::test]
+async fn test_pdf_force_llm_uses_mock_page_conversion() {
+    let markitdown = MarkItDown::new();
+    let llm = Arc::new(MockLlmClient::new().with_text_response("mock pdf page markdown"));
+    let options = ConversionOptions::default()
+        .with_extension(".pdf")
+        .with_llm(llm)
+        .with_force_llm_ocr(true);
+
+    let result = markitdown
+        .convert("tests/test_documents/pdfs/fake_memo.pdf", Some(options))
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "PDF LLM conversion failed: {:?}",
+        result.err()
+    );
+
+    let content = result.unwrap().to_markdown();
+    assert!(
+        content.contains("mock pdf page markdown"),
+        "Forced LLM conversion should use mocked page markdown"
+    );
 }
 
 // ============================================================================

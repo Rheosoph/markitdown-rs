@@ -179,8 +179,8 @@ async fn test_bzip2_bytes_conversion() {
 // XZ tests (create minimal in-memory test)
 #[tokio::test]
 async fn test_xz_bytes_conversion() {
-    use std::io::Write;
     use liblzma::write::XzEncoder;
+    use std::io::Write;
 
     let md = MarkItDown::new();
 

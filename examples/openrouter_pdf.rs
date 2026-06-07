@@ -15,6 +15,8 @@
 //! OpenRouter privacy settings: https://openrouter.ai/settings/privacy
 //! Otherwise you may see 404 errors when using multimodal (image) requests.
 
+use liteparse::types::PdfInput;
+use liteparse::{LiteParse, LiteParseConfig};
 use markitdown::table_merge;
 use markitdown::{create_llm_client_with_config, ConversionOptions, LlmConfig, MarkItDown};
 use rig::client::{CompletionClient, ProviderClient};
@@ -83,10 +85,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("PDF parsed with hayro: {} pages", pdf.pages().len());
     }
 
-    // Also check pdf_extract page splits
-    if let Ok(text) = pdf_extract::extract_text_from_mem(&bytes) {
-        let page_count = text.split('\x0c').count();
-        println!("pdf_extract form feed pages: {}", page_count);
+    // Also check liteparse text pages without local OCR.
+    let liteparse_config = LiteParseConfig {
+        ocr_enabled: false,
+        quiet: true,
+        ..LiteParseConfig::default()
+    };
+    if let Ok(parsed) = LiteParse::new(liteparse_config)
+        .parse_input(PdfInput::Bytes(bytes))
+        .await
+    {
+        println!(
+            "PDF parsed with liteparse: {} text pages",
+            parsed.pages.len()
+        );
     }
 
     match markitdown.convert(TEST_PDF, Some(options)).await {

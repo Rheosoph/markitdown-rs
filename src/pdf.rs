@@ -7,7 +7,7 @@
 //! - Pages with embedded images + limited text (rendered for full context)
 //! - Poor quality OCR/extraction results (detected and re-processed via LLM)
 //!
-//! Uses hayro for PDF rendering when LLM fallback is needed.
+//! Uses liteparse for PDF text extraction and hayro for rendering when LLM fallback is needed.
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -16,9 +16,9 @@ use hayro::{render, RenderSettings};
 use hayro_syntax::object::dict::keys::{HEIGHT, SUBTYPE, WIDTH};
 use hayro_syntax::object::{Name, Stream};
 use hayro_syntax::Pdf;
+use liteparse::types::PdfInput;
+use liteparse::{LiteParse, LiteParseConfig, OutputFormat};
 use object_store::ObjectStore;
-use pdf_extract;
-use std::panic;
 use std::sync::Arc;
 
 use crate::error::MarkitdownError;
@@ -251,6 +251,25 @@ impl PageMetrics {
 pub struct PdfConverter;
 
 impl PdfConverter {
+    fn is_pdf_data(bytes: &[u8]) -> bool {
+        let header_len = bytes.len().min(1024);
+        bytes[..header_len]
+            .windows(4)
+            .any(|window| window == b"%PDF")
+    }
+
+    /// Configure liteparse for native PDF text extraction only.
+    fn liteparse_config() -> LiteParseConfig {
+        LiteParseConfig {
+            ocr_enabled: false,
+            quiet: true,
+            max_pages: usize::MAX,
+            output_format: OutputFormat::Text,
+            preserve_very_small_text: true,
+            ..LiteParseConfig::default()
+        }
+    }
+
     /// Render a PDF page as PNG image using hayro
     fn render_page_as_image(pdf: &Pdf, page_index: usize) -> Result<Vec<u8>, MarkitdownError> {
         let pages = pdf.pages();
@@ -278,32 +297,30 @@ impl PdfConverter {
             .map_err(|e| MarkitdownError::ParseError(format!("Failed to parse PDF: {:?}", e)))
     }
 
-    /// Extract text from PDF and split by pages.
-    /// Uses catch_unwind to handle panics from pdf-extract on malformed PDFs.
-    fn extract_text_by_page(bytes: &[u8]) -> Result<Vec<String>, MarkitdownError> {
-        let bytes_owned = bytes.to_vec();
-        let text_content =
-            panic::catch_unwind(move || pdf_extract::extract_text_from_mem(&bytes_owned))
-                .map_err(|_| {
-                    MarkitdownError::ParseError(
-                        "PDF text extraction panicked (likely malformed content stream)"
-                            .to_string(),
-                    )
-                })?
-                .map_err(|e| {
-                    MarkitdownError::ParseError(format!("Failed to extract text from PDF: {}", e))
-                })?;
+    /// Extract PDF text by page using liteparse.
+    async fn extract_text_by_page(bytes: &[u8]) -> Result<Vec<String>, MarkitdownError> {
+        if !Self::is_pdf_data(bytes) {
+            return Err(MarkitdownError::ParseError(
+                "Expected PDF data before invoking liteparse".to_string(),
+            ));
+        }
 
-        // Split by form feed (page separator)
-        let pages: Vec<String> = text_content.split('\x0c').map(|s| s.to_string()).collect();
+        let parser = LiteParse::new(Self::liteparse_config());
+        let input = PdfInput::Bytes(bytes.to_vec());
 
-        Ok(pages)
+        let result = parser.parse_input(input).await.map_err(|e| {
+            MarkitdownError::ParseError(format!(
+                "Failed to extract text from PDF with liteparse: {e}"
+            ))
+        })?;
+
+        Ok(result.pages.into_iter().map(|page| page.text).collect())
     }
 
     /// Extract text aligned to actual PDF page count
     /// If text extraction gives different page count than PDF structure, redistribute text
-    fn extract_text_aligned_to_pages(bytes: &[u8], actual_page_count: usize) -> Vec<String> {
-        let extracted = Self::extract_text_by_page(bytes).unwrap_or_default();
+    async fn extract_text_aligned_to_pages(bytes: &[u8], actual_page_count: usize) -> Vec<String> {
+        let extracted = Self::extract_text_by_page(bytes).await.unwrap_or_default();
 
         if extracted.len() == actual_page_count {
             // Perfect alignment
@@ -460,9 +477,9 @@ impl PdfConverter {
 
         // Get text aligned to actual page count if we have it
         let page_texts = if actual_page_count > 0 {
-            Self::extract_text_aligned_to_pages(bytes, actual_page_count)
+            Self::extract_text_aligned_to_pages(bytes, actual_page_count).await
         } else {
-            Self::extract_text_by_page(bytes).unwrap_or_default()
+            Self::extract_text_by_page(bytes).await.unwrap_or_default()
         };
 
         let page_count = if actual_page_count > 0 {
@@ -616,17 +633,16 @@ impl PdfConverter {
     }
 
     /// Basic conversion without LLM (original behavior)
-    fn convert_basic(&self, bytes: &[u8]) -> Result<Document, MarkitdownError> {
+    async fn convert_basic(&self, bytes: &[u8]) -> Result<Document, MarkitdownError> {
         // Try to get actual page count from PDF structure
         let pdf = Self::parse_pdf(bytes).ok();
         let actual_page_count = pdf.as_ref().map(|p| p.pages().len()).unwrap_or(0);
 
         // Get text aligned to actual pages if possible
         let page_texts = if actual_page_count > 0 {
-            Self::extract_text_aligned_to_pages(bytes, actual_page_count)
+            Self::extract_text_aligned_to_pages(bytes, actual_page_count).await
         } else {
-            // Use catch_unwind to guard against panics in pdf-extract on malformed PDFs
-            Self::extract_text_by_page(bytes).unwrap_or_default()
+            Self::extract_text_by_page(bytes).await.unwrap_or_default()
         };
 
         let mut document = Document::new();
@@ -651,13 +667,11 @@ impl PdfConverter {
             }
         } else if document.pages.is_empty() {
             // Fallback: single page with all text
-            let bytes_owned = bytes.to_vec();
-            let text_content =
-                panic::catch_unwind(move || pdf_extract::extract_text_from_mem(&bytes_owned))
-                    .ok()
-                    .and_then(|r| r.ok())
-                    .map(|t| t.trim().to_string())
-                    .unwrap_or_default();
+            let text_content = Self::extract_text_by_page(bytes)
+                .await
+                .ok()
+                .map(|pages| pages.join("\n\n").trim().to_string())
+                .unwrap_or_default();
             let mut page = Page::new(1);
             if text_content.is_empty() {
                 page.add_content(ContentBlock::Text(
@@ -705,7 +719,7 @@ impl DocumentConverter for PdfConverter {
             }
         }
 
-        self.convert_basic(&bytes)
+        self.convert_basic(&bytes).await
     }
 
     async fn convert_bytes(
@@ -734,7 +748,7 @@ impl DocumentConverter for PdfConverter {
             }
         }
 
-        self.convert_basic(&bytes)
+        self.convert_basic(&bytes).await
     }
 
     fn supported_extensions(&self) -> &[&str] {
