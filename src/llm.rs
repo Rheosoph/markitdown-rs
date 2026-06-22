@@ -13,7 +13,7 @@
 //! use rig::providers::openai;
 //! use markitdown::llm::{LlmWrapper, LlmConfig};
 //!
-//! let client = openai::Client::from_env();
+//! let client = openai::Client::from_env().expect("OPENAI_API_KEY must be set");
 //! let model = client.completion_model("gpt-4o");
 //! let llm = LlmWrapper::new(model);
 //! ```
@@ -217,7 +217,7 @@ pub trait LlmClient: Send + Sync {
 /// use markitdown::llm::{LlmWrapper, LlmConfig};
 ///
 /// // Create with any provider
-/// let client = openai::Client::from_env();
+/// let client = openai::Client::from_env().expect("OPENAI_API_KEY must be set");
 /// let model = client.completion_model("gpt-4o");
 /// let llm = LlmWrapper::new(model);
 ///

@@ -18,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Example 1: Creating an LLM client with OpenAI ===\n");
 
     if let Ok(_) = std::env::var("OPENAI_API_KEY") {
-        let openai_client = openai::Client::from_env();
+        let openai_client = openai::Client::from_env()?;
         let openai_model = openai_client.completion_model("gpt-4o");
         let llm = create_llm_client(openai_model);
 
@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Example 2: Creating an LLM client with Anthropic ===\n");
 
     if let Ok(_) = std::env::var("ANTHROPIC_API_KEY") {
-        let anthropic_client = anthropic::Client::from_env();
+        let anthropic_client = anthropic::Client::from_env()?;
         let anthropic_model = anthropic_client.completion_model("claude-sonnet-4-20250514");
         let llm = create_llm_client(anthropic_model);
 
@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Example 3: Creating an LLM client with Google Gemini ===\n");
 
     if let Ok(_) = std::env::var("GEMINI_API_KEY") {
-        let gemini_client = gemini::Client::from_env();
+        let gemini_client = gemini::Client::from_env()?;
         let gemini_model = gemini_client.completion_model("gemini-2.0-flash");
         let llm = create_llm_client(gemini_model);
 
@@ -65,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Example 4: Custom LLM configuration ===\n");
 
     if let Ok(_) = std::env::var("OPENAI_API_KEY") {
-        let openai_client = openai::Client::from_env();
+        let openai_client = openai::Client::from_env()?;
         let openai_model = openai_client.completion_model("gpt-4o-mini");
 
         let config = LlmConfig::default()

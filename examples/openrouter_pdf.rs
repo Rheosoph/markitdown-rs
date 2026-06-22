@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create OpenRouter client
     println!("Creating OpenRouter client...");
-    let openrouter_client = openrouter::Client::from_env();
+    let openrouter_client = openrouter::Client::from_env()?;
 
     // Use the model from OPENROUTER_MODEL env var, or default to @preset/prod-free
     let model_id =

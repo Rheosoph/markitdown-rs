@@ -225,17 +225,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Create an LLM client using any rig-core compatible provider
     // OpenAI example:
-    let openai_client = openai::Client::from_env();
+    let openai_client = openai::Client::from_env()?;
     let model = openai_client.completion_model("gpt-4o");
     let llm = create_llm_client(model);
     
     // Google Gemini example:
-    // let gemini_client = gemini::Client::from_env();
+    // let gemini_client = gemini::Client::from_env()?;
     // let model = gemini_client.completion_model("gemini-2.0-flash");
     // let llm = create_llm_client(model);
     
     // Anthropic Claude example:
-    // let anthropic_client = anthropic::Client::from_env();
+    // let anthropic_client = anthropic::Client::from_env()?;
     // let model = anthropic_client.completion_model("claude-sonnet-4-20250514");
     // let llm = create_llm_client(model);
     
