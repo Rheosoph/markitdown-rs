@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::vello_cpu::color::palette::css::WHITE;
-use hayro::{render, RenderSettings};
+use hayro::{render, PixmapSettings, RenderCache, RenderSettings};
 use hayro_syntax::object::dict::keys::{HEIGHT, SUBTYPE, WIDTH};
 use hayro_syntax::object::{Name, Stream};
 use hayro_syntax::Pdf;
@@ -292,10 +292,13 @@ impl PdfConverter {
             MarkitdownError::ParseError(format!("Page {} not found", page_index + 1))
         })?;
 
-        let interpreter_settings = InterpreterSettings::default();
-        let render_settings = RenderSettings::default();
-
-        let pixmap = render(page, &interpreter_settings, &render_settings);
+        let pixmap = render(
+            page,
+            &RenderCache::new(),
+            &InterpreterSettings::default(),
+            &RenderSettings::default(),
+            &PixmapSettings::default(),
+        );
 
         // Encode as PNG (into_png consumes the pixmap)
         let png_data = pixmap.into_png().map_err(|e| {
@@ -320,14 +323,19 @@ impl PdfConverter {
 
         let (width, height) = page.render_dimensions();
         let scale = (max_edge as f32 / width.max(height).max(1.0)).clamp(0.25, 4.0);
-        let render_settings = RenderSettings {
+        let pixmap_settings = PixmapSettings {
             x_scale: scale,
             y_scale: scale,
             bg_color: WHITE,
-            ..RenderSettings::default()
         };
 
-        let pixmap = render(page, &InterpreterSettings::default(), &render_settings);
+        let pixmap = render(
+            page,
+            &RenderCache::new(),
+            &InterpreterSettings::default(),
+            &RenderSettings::default(),
+            &pixmap_settings,
+        );
         let (pixel_width, pixel_height) = (pixmap.width() as u32, pixmap.height() as u32);
         let png_data = pixmap.into_png().map_err(|e| {
             MarkitdownError::ParseError(format!("Failed to encode PDF page as PNG: {:?}", e))
@@ -347,8 +355,7 @@ impl PdfConverter {
 
     /// Parse PDF using hayro
     fn parse_pdf(bytes: &[u8]) -> Result<Pdf, MarkitdownError> {
-        let data: Arc<dyn AsRef<[u8]> + Send + Sync> = Arc::new(bytes.to_vec());
-        Pdf::new(data)
+        Pdf::new(bytes.to_vec())
             .map_err(|e| MarkitdownError::ParseError(format!("Failed to parse PDF: {:?}", e)))
     }
 

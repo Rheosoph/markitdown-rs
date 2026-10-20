@@ -80,8 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // First, let's check actual page count with hayro
     let bytes = std::fs::read(TEST_PDF)?;
-    let data: std::sync::Arc<dyn AsRef<[u8]> + Send + Sync> = std::sync::Arc::new(bytes.clone());
-    if let Ok(pdf) = hayro_syntax::Pdf::new(data) {
+    if let Ok(pdf) = hayro_syntax::Pdf::new(bytes.clone()) {
         println!("PDF parsed with hayro: {} pages", pdf.pages().len());
     }
 
