@@ -1,6 +1,6 @@
 //! PDF conversion tests using kreuzberg test documents
 use bytes::Bytes;
-use markitdown::{model::ConversionOptions, MarkItDown, MockLlmClient};
+use markitdown::{error::MarkitdownError, model::ConversionOptions, MarkItDown, MockLlmClient};
 use std::sync::Arc;
 
 fn default_options(ext: &str) -> ConversionOptions {
@@ -12,6 +12,7 @@ fn default_options(ext: &str) -> ConversionOptions {
         extract_images: true,
         force_llm_ocr: false,
         merge_multipage_tables: false,
+        ..Default::default()
     }
 }
 
@@ -230,6 +231,69 @@ async fn test_pdf_bytes_conversion() {
     let doc = result.unwrap();
     let content = doc.to_markdown();
     assert!(!content.is_empty(), "Content should not be empty");
+}
+
+// ============================================================================
+// Corrupt PDF Handling
+// ============================================================================
+
+#[tokio::test]
+async fn test_pdf_truncated_returns_parse_error() {
+    let markitdown = MarkItDown::new();
+    let result = markitdown
+        .convert_bytes(
+            Bytes::from_static(include_bytes!(
+                "./test_documents/pdfs/truncated_corrupt.pdf"
+            )),
+            Some(default_options(".pdf")),
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(MarkitdownError::ParseError(_))),
+        "Truncated PDF should fail with a parse error, got: {:?}",
+        result.map(|doc| doc.to_markdown())
+    );
+}
+
+#[tokio::test]
+async fn test_pdf_truncated_with_llm_returns_parse_error() {
+    let markitdown = MarkItDown::new();
+    let llm = Arc::new(MockLlmClient::new().with_text_response("mock pdf page markdown"));
+    let options = ConversionOptions::default()
+        .with_extension(".pdf")
+        .with_llm(llm)
+        .with_force_llm_ocr(true);
+
+    let result = markitdown
+        .convert(
+            "tests/test_documents/pdfs/truncated_corrupt.pdf",
+            Some(options),
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(MarkitdownError::ParseError(_))),
+        "Truncated PDF should fail with a parse error, got: {:?}",
+        result.map(|doc| doc.to_markdown())
+    );
+}
+
+#[tokio::test]
+async fn test_pdf_extension_on_non_pdf_bytes_returns_parse_error() {
+    let markitdown = MarkItDown::new();
+    let result = markitdown
+        .convert_bytes(
+            Bytes::from_static(b"this is not a pdf"),
+            Some(default_options(".pdf")),
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(MarkitdownError::ParseError(_))),
+        "Non-PDF bytes should fail with a parse error, got: {:?}",
+        result.map(|doc| doc.to_markdown())
+    );
 }
 
 // ============================================================================

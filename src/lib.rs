@@ -36,6 +36,7 @@ pub mod rss;
 pub mod rst;
 pub mod rtf;
 pub mod sqlite;
+pub mod summarize;
 pub mod table_merge;
 pub mod typst;
 pub mod vcard;
@@ -88,13 +89,16 @@ use zip::ZipArchive;
 
 // Re-export key types
 pub use llm::{
-    create_llm_client, create_llm_client_with_config, LlmClient, LlmConfig, LlmWrapper,
-    MockLlmClient, SharedLlmClient,
+    create_llm_client, create_llm_client_with_config, LlmClient, LlmConfig, LlmResponse,
+    LlmWrapper, MockLlmClient, PromptPart, SharedLlmClient, TokenUsage,
 };
-pub use model::{ContentBlock, ConversionOptions, Document, ExtractedImage, Page};
+pub use model::{ContentBlock, ConversionMode, ConversionOptions, Document, ExtractedImage, Page};
 pub use prompts::{
     DEFAULT_BATCH_IMAGE_PROMPT, DEFAULT_IMAGE_DESCRIPTION_PROMPT, DEFAULT_PAGE_CONVERSION_PROMPT,
+    DEFAULT_SUMMARY_DIRECT_PROMPT, DEFAULT_SUMMARY_MERGE_PROMPT, DEFAULT_SUMMARY_NOTES_PROMPT,
+    DEFAULT_SUMMARY_PROMPT,
 };
+pub use summarize::{DocumentSummary, SummaryConfig, SummaryStrategy};
 
 /// Main interface for converting documents to markdown
 pub struct MarkItDown {
@@ -285,8 +289,50 @@ impl MarkItDown {
         None
     }
 
-    /// Convert a file from the object store to a Document
+    /// LLM client and settings when the options ask for summarization mode
+    fn summarization(
+        options: Option<&ConversionOptions>,
+    ) -> Result<Option<(SharedLlmClient, SummaryConfig)>, MarkitdownError> {
+        let Some(config) = options.and_then(|opts| opts.summary_config()) else {
+            return Ok(None);
+        };
+        let llm = options
+            .and_then(|opts| opts.llm_client.clone())
+            .ok_or_else(|| {
+                MarkitdownError::LlmError(
+                    "Summarization mode requires an LLM client (ConversionOptions::with_llm)"
+                        .to_string(),
+                )
+            })?;
+        Ok(Some((llm, config.clone())))
+    }
+
+    /// Summarize the converted document when in summarization mode
+    async fn finish(
+        document: Document,
+        summarization: Option<(SharedLlmClient, SummaryConfig)>,
+    ) -> Result<Document, MarkitdownError> {
+        match summarization {
+            Some((llm, config)) => document.summarize(llm.as_ref(), &config).await,
+            None => Ok(document),
+        }
+    }
+
+    /// Convert a file from the object store to a Document.
+    ///
+    /// In summarization mode ([`ConversionOptions::with_summarization`]) the returned
+    /// document holds page notes and a [`DocumentSummary`] instead of the full content.
     pub async fn convert(
+        &self,
+        path: &str,
+        options: Option<ConversionOptions>,
+    ) -> Result<Document, MarkitdownError> {
+        let summarization = Self::summarization(options.as_ref())?;
+        let document = self.convert_document(path, options).await?;
+        Self::finish(document, summarization).await
+    }
+
+    async fn convert_document(
         &self,
         path: &str,
         mut options: Option<ConversionOptions>,
@@ -344,8 +390,21 @@ impl MarkItDown {
         )))
     }
 
-    /// Convert bytes directly to a Document
+    /// Convert bytes directly to a Document.
+    ///
+    /// In summarization mode ([`ConversionOptions::with_summarization`]) the returned
+    /// document holds page notes and a [`DocumentSummary`] instead of the full content.
     pub async fn convert_bytes(
+        &self,
+        bytes: Bytes,
+        options: Option<ConversionOptions>,
+    ) -> Result<Document, MarkitdownError> {
+        let summarization = Self::summarization(options.as_ref())?;
+        let document = self.convert_bytes_document(bytes, options).await?;
+        Self::finish(document, summarization).await
+    }
+
+    async fn convert_bytes_document(
         &self,
         bytes: Bytes,
         mut options: Option<ConversionOptions>,
@@ -503,10 +562,14 @@ impl MarkItDown {
                                 text: format!("File: {}", file_name),
                             });
 
-                            // Add content from converted document
+                            // Add content from converted document (page renders made
+                            // for summarization are kept as images)
                             for file_page in file_doc.pages {
                                 for block in file_page.content {
                                     page.add_content(block);
+                                }
+                                if let Some(rendered) = file_page.rendered_image {
+                                    page.add_content(ContentBlock::Image(rendered));
                                 }
                             }
 

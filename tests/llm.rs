@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use markitdown::{create_llm_client, ConversionOptions, MarkItDown};
+use markitdown::{create_llm_client, ConversionOptions, MarkItDown, SummaryConfig};
 use rig::client::CompletionClient;
 use rig::providers::{azure, azure::AzureOpenAIAuth, gemini, openai, openrouter};
 use std::env;
@@ -8,6 +8,24 @@ use std::env;
 const TEST_IMAGE_PATH: &str = "tests/test_documents/images/2305_03393v1_pg9_img.png";
 /// Test PDF with images
 const TEST_PDF_PATH: &str = "tests/test_documents/pdf/with_images.pdf";
+/// Five-page text PDF for summarization
+const MULTI_PAGE_PDF_PATH: &str = "tests/test_documents/pdfs/multi_page.pdf";
+
+/// Print a summarized document and check that it has a summary for every page
+fn check_summary(provider: &str, doc: &markitdown::Document) {
+    let summary = doc.summary.as_ref().expect("document has a summary");
+    println!(
+        "✓ {} Summary ({} requests, {} input / {} output tokens):\n{}",
+        provider,
+        summary.usage.requests,
+        summary.usage.input_tokens,
+        summary.usage.output_tokens,
+        safe_truncate(&doc.to_markdown(), 3000)
+    );
+    assert!(!summary.summary.is_empty(), "Summary should not be empty");
+    assert!(summary.failed_pages.is_empty(), "All pages should be read");
+    assert!(!doc.pages.is_empty(), "Pages should hold notes");
+}
 
 /// Safely truncate a string to a maximum number of characters (not bytes)
 fn safe_truncate(s: &str, max_chars: usize) -> &str {
@@ -179,6 +197,58 @@ async fn test_openrouter_text_completion() {
             assert!(!response.is_empty(), "Response should not be empty");
         }
         Err(e) => panic!("OpenRouter text completion test failed: {}", e),
+    }
+}
+
+#[tokio::test]
+async fn test_openrouter_pdf_summarization() {
+    let _ = dotenvy::dotenv();
+
+    let api_key = env::var("OPENROUTER_API_KEY");
+    let endpoint = env::var("OPENROUTER_ENDPOINT");
+    let model = env::var("OPENROUTER_MODEL");
+
+    if api_key.is_err() || endpoint.is_err() || model.is_err() {
+        println!("Skipping OpenRouter summarization test");
+        return;
+    }
+
+    let api_key = api_key.unwrap();
+    let endpoint = endpoint.unwrap();
+    let model_name = model.unwrap();
+
+    let endpoint = endpoint.trim_end_matches('/');
+    let endpoint = if endpoint.ends_with("/v1") {
+        endpoint.to_string()
+    } else {
+        format!("{}/v1", endpoint)
+    };
+
+    println!(
+        "Running OpenRouter summarization test with model: {}",
+        model_name
+    );
+
+    let client: openrouter::Client = openrouter::Client::builder()
+        .api_key(api_key)
+        .base_url(endpoint.as_str())
+        .build()
+        .expect("Failed to build OpenRouter client");
+    let llm_client = create_llm_client(client.completion_model(&model_name));
+
+    // A text PDF is read as text, so the model needs no vision support. Windows of two
+    // pages exercise the multi-request path (notes, then the final summary).
+    let options = ConversionOptions::new()
+        .with_extension(".pdf")
+        .with_llm(llm_client)
+        .with_summarization(SummaryConfig::default().with_max_pages_per_window(2));
+
+    match MarkItDown::new()
+        .convert(MULTI_PAGE_PDF_PATH, Some(options))
+        .await
+    {
+        Ok(doc) => check_summary("OpenRouter", &doc),
+        Err(e) => panic!("OpenRouter summarization test failed: {}", e),
     }
 }
 
@@ -372,6 +442,53 @@ async fn test_azure_openai_pdf_conversion() {
             }
             eprintln!("Azure OpenAI PDF conversion test failed: {}", e);
             panic!("Azure OpenAI PDF conversion test failed: {}", e);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_azure_openai_pdf_summarization() {
+    let _ = dotenvy::dotenv();
+
+    let api_key = env::var("AZURE_API_KEY");
+    let endpoint = env::var("AZURE_ENDPOINT");
+    let api_version = env::var("AZURE_API_VERSION").or_else(|_| env::var("AZURE_VERSION"));
+    let deployment_id = azure_deployment_id();
+
+    if api_key.is_err() || endpoint.is_err() || api_version.is_err() || deployment_id.is_err() {
+        println!("Skipping Azure OpenAI summarization test: Missing environment variables");
+        return;
+    }
+
+    let api_key = api_key.unwrap();
+    let endpoint = endpoint.unwrap();
+    let api_version = api_version.unwrap();
+    let deployment_id = deployment_id.unwrap();
+
+    let client = azure_build_client(api_key, endpoint, &api_version);
+    let llm_client = create_llm_client(client.completion_model(&deployment_id));
+
+    // Forcing visual reading sends every page as an image next to its text
+    let options = ConversionOptions::new()
+        .with_extension(".pdf")
+        .with_llm(llm_client)
+        .with_force_llm_ocr(true)
+        .with_summarization(SummaryConfig::default());
+
+    match MarkItDown::new()
+        .convert(MULTI_PAGE_PDF_PATH, Some(options))
+        .await
+    {
+        Ok(doc) => check_summary("Azure OpenAI", &doc),
+        Err(e) => {
+            if should_skip_missing_azure_deployment(
+                "Azure OpenAI summarization test",
+                &deployment_id,
+                &e,
+            ) {
+                return;
+            }
+            panic!("Azure OpenAI summarization test failed: {}", e);
         }
     }
 }

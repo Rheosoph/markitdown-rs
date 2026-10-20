@@ -82,3 +82,70 @@ Please provide:
 5. **Key Information**: Any measurements, values, or critical annotations
 
 Output the information in a structured format that preserves the logical relationships."#;
+
+// Summarization mode prompts. The rules are shared fragments (macros, so `concat!` can
+// join them at compile time) because the single-request prompt combines both rule sets.
+
+macro_rules! summary_notes_rules {
+    () => {
+        r#"Input: document context in <document>, sometimes a summary of the preceding pages in <context_so_far>, and the pages in <page> tags. A page can arrive as text, as an image of the page, or both; when both are given, trust the image for layout, tables and figures and the text for exact spelling and numbers.
+
+Notes: for each page, terse bullet points, most important first, covering:
+- the main topic, claims, findings, conclusions and decisions
+- concrete specifics: numbers with units, dates, amounts, names of people, organizations, products and places, definitions, requirements, obligations, risks and action items
+- the takeaway of tables, charts and figures (trends, extremes, key values) instead of a transcription
+- content that continues from or onto another page
+
+Rules for notes:
+- Use only what the page shows: no outside knowledge, guesses or interpretation. Write "(illegible)" where content cannot be read, and never invent text for blank or figure-only pages.
+- Copy figures, units, dates and names exactly as written.
+- Skip boilerplate such as running headers and footers, page numbers, tables of contents, copyright notices and navigation. For a page without substantive content (cover, blank page, index, reference list), write a single bullet saying what it is.
+- Keep each page within its note_budget; sparse pages need far fewer words. Never pad."#
+    };
+}
+
+macro_rules! summary_writing_rules {
+    () => {
+        r#"Rules for the summary:
+- Start with one sentence on what the document is (type, purpose, author or organization if known) and its main conclusion or outcome.
+- Cover the whole document in proportion to its content, including the middle, not only the beginning and the end. Prefer concrete specifics: key numbers, dates, names and decisions.
+- Base every statement on the material you are given. Do not add facts, and do not speculate about pages marked as unread.
+- Be neutral and precise; avoid filler such as "This document discusses".
+- Write each key point as one specific, self-contained sentence."#
+    };
+}
+
+/// Default system prompt for reading pages into notes (summarization mode).
+///
+/// The notes stand in for the pages: later steps never see the pages again, so the notes
+/// must keep what matters while staying short.
+pub const DEFAULT_SUMMARY_NOTES_PROMPT: &str = concat!(
+    "You are an expert analyst taking reading notes on a document. Later steps work only from your notes and never see the pages, so capture everything important while staying short.\n\n",
+    summary_notes_rules!(),
+    "\n\nOutput only the requested tags, with no preamble or commentary."
+);
+
+/// Default system prompt for condensing notes into a section summary (summarization mode).
+pub const DEFAULT_SUMMARY_MERGE_PROMPT: &str = r#"You condense reading notes on part of a document into a section summary for a later summarizer.
+
+Keep the most important claims, findings, decisions and concrete specifics (numbers, dates, names), and cite the pages of each point, such as [p. 12] or [pp. 12-14]. Merge points that repeat across pages. Remove minor detail. Use only the notes: do not add, infer or generalize beyond them. Where notes conflict, keep both versions and say so.
+
+Write compact bullet points, most important first. Output only the section summary."#;
+
+/// Default system prompt for the final document summary written from notes
+/// (summarization mode).
+pub const DEFAULT_SUMMARY_PROMPT: &str = concat!(
+    "You are an expert analyst writing the final summary of a document from reading notes that cover it page by page; for long documents, some notes arrive condensed into section summaries.\n\n",
+    summary_writing_rules!(),
+    "\n\nOutput only the requested tags, with no preamble or commentary."
+);
+
+/// Default system prompt for short documents that are read and summarized in a single
+/// request (summarization mode).
+pub const DEFAULT_SUMMARY_DIRECT_PROMPT: &str = concat!(
+    "You are an expert analyst. You read a short document, take concise notes on each page, and then write the document's final summary from the pages and your notes.\n\n",
+    summary_notes_rules!(),
+    "\n\n",
+    summary_writing_rules!(),
+    "\n\nOutput only the requested tags, with no preamble or commentary."
+);

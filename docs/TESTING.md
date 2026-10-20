@@ -57,6 +57,16 @@ cargo test --test llm
 
 If the environment variables are missing, the tests will be automatically skipped.
 
+### Summarization Mode Tests
+
+`tests/summarize.rs` covers summarization mode without network access. A scripted `LlmClient` records every request and answers in the tag format the pipeline asks for. The tests check routing (text, page images, embedded images, never transcription), the single-request path for short documents, the concurrent and sequential strategies, failure reporting, and pruning and merging of long notes:
+
+```bash
+cargo test --test summarize
+```
+
+The live counterparts (`test_openrouter_pdf_summarization`, `test_azure_openai_pdf_summarization`) live in `tests/llm.rs` and are skipped without credentials.
+
 ## Test Structure
 
 Tests are organized by format in the `tests/` directory:
@@ -162,6 +172,7 @@ fn default_options(ext: &str) -> ConversionOptions {
         extract_images: true,
         force_llm_ocr: false,
         merge_multipage_tables: false,
+        ..Default::default()
     }
 }
 

@@ -97,7 +97,7 @@ impl ImageConverter {
 
         // If LLM client is provided, get description
         if let Some(ref opts) = args {
-            if let Some(ref llm_client) = opts.llm_client {
+            if let Some(llm_client) = opts.image_description_llm() {
                 if let Ok(mut descriptions) = llm_client.describe_extracted_images(&[&image]).await
                 {
                     if let Some(description) = descriptions.pop() {

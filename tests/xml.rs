@@ -16,6 +16,7 @@ fn default_options(ext: &str) -> ConversionOptions {
         extract_images: true,
         force_llm_ocr: false,
         merge_multipage_tables: false,
+        ..Default::default()
     }
 }
 

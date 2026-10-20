@@ -215,6 +215,33 @@ page.add_content(ContentBlock::Image(image));
 
 When the document is serialized to Markdown with `.to_markdown()`, images are saved to disk and referenced as Markdown image links.
 
+## LLM Modes: Extraction and Summarization
+
+`ConversionOptions::mode` selects what an LLM is used for:
+
+- **`ConversionMode::Extract`** (default): converters produce the full content. Pages that need vision are transcribed by the LLM, and embedded images get descriptions.
+- **`ConversionMode::Summarize(SummaryConfig)`**: converters only *read* the document, and `MarkItDown::convert` then runs `summarize::summarize_document` on the result. Pages go to the LLM as input, and it writes page notes plus a `DocumentSummary`, so nothing is transcribed.
+
+Converters follow two rules so that both modes work:
+
+1. Describe embedded images only through `options.image_description_llm()`. It returns `None` in summarization mode, because the summarizer sends images to the LLM together with their page.
+2. A page that can only be understood visually gets a `rendered_image` in summarization mode instead of an LLM transcription. `PdfConverter` does this for scanned pages, garbled text and figure-heavy pages, rendered on white at `SummaryConfig::page_image_max_edge`.
+
+```rust
+if let Some(llm) = opts.image_description_llm() {
+    document = document.with_image_descriptions(llm.as_ref()).await?;
+}
+```
+
+The summarizer (`src/summarize.rs`) works on any `Document`:
+
+1. It turns pages into prompt parts (page render first, then text with embedded images inline), removing running headers and footers.
+2. It packs them into windows and has the LLM write notes per page, either concurrently (`MapReduce`) or in order with a running summary (`Sequential`).
+3. It prunes the notes, then condenses them only if needed.
+4. One final request writes the summary.
+
+A document that fits one window takes a single request. The LLM calls go through `LlmClient::complete_multimodal`, which takes ordered text and image parts and reports token usage.
+
 ## Error Handling
 
 Use the `MarkitdownError` enum for all errors:
@@ -269,6 +296,7 @@ fn default_options(ext: &str) -> ConversionOptions {
         extract_images: true,
         force_llm_ocr: false,
         merge_multipage_tables: false,
+        ..Default::default()
     }
 }
 

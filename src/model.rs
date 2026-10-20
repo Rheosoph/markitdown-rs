@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::error::MarkitdownError;
 use crate::llm::{LlmClient, SharedLlmClient};
+use crate::summarize::{self, DocumentSummary, SummaryConfig};
 use crate::table_merge;
 
 /// Represents an extracted image from a document
@@ -308,6 +309,10 @@ pub struct Document {
     pub pages: Vec<Page>,
     /// Document-level metadata
     pub metadata: std::collections::HashMap<String, String>,
+    /// Document summary, set when the document was produced in summarization mode.
+    /// The pages then hold the LLM's notes for each page instead of the full content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<DocumentSummary>,
 }
 
 impl Document {
@@ -316,6 +321,7 @@ impl Document {
             title: None,
             pages: Vec::new(),
             metadata: std::collections::HashMap::new(),
+            summary: None,
         }
     }
 
@@ -325,6 +331,7 @@ impl Document {
             title: None,
             pages: vec![page],
             metadata: std::collections::HashMap::new(),
+            summary: None,
         }
     }
 
@@ -346,11 +353,29 @@ impl Document {
     }
 
     /// Convert the entire document to markdown
+    ///
+    /// For summarized documents this renders the summary and key points, followed by
+    /// the notes for each page.
     pub fn to_markdown(&self) -> String {
         let mut md = String::new();
 
         if let Some(title) = &self.title {
             md.push_str(&format!("# {}\n\n", title));
+        }
+
+        if let Some(summary) = &self.summary {
+            md.push_str(&summary.to_markdown());
+            if !self.pages.is_empty() {
+                md.push_str("\n## Notes\n");
+            }
+            for page in &self.pages {
+                if self.pages.len() > 1 {
+                    md.push_str(&format!("\n### Page {}\n", page.page_number));
+                }
+                md.push('\n');
+                md.push_str(&page.to_markdown());
+            }
+            return md;
         }
 
         for page in &self.pages {
@@ -371,6 +396,7 @@ impl Document {
         let mut new_doc = Document::new();
         new_doc.title = self.title.clone();
         new_doc.metadata = self.metadata.clone();
+        new_doc.summary = self.summary.clone();
 
         for page in &self.pages {
             new_doc.add_page(page.with_image_descriptions(llm_client).await?);
@@ -379,11 +405,26 @@ impl Document {
         Ok(new_doc)
     }
 
+    /// Summarize this document: concise notes for every page plus a document summary.
+    ///
+    /// Pages are sent to the LLM as input (text, rendered page images, embedded images)
+    /// and only notes are generated, so no page is transcribed. The returned document's
+    /// pages hold the notes and [`Document::summary`] holds the summary.
+    /// See [`crate::summarize`] for the pipeline.
+    pub async fn summarize(
+        &self,
+        llm_client: &dyn LlmClient,
+        config: &SummaryConfig,
+    ) -> Result<Document, MarkitdownError> {
+        summarize::summarize_document(self, llm_client, config).await
+    }
+
     /// Convert to text-only document
     pub fn to_text_only(&self) -> Document {
         let mut new_doc = Document::new();
         new_doc.title = self.title.clone();
         new_doc.metadata = self.metadata.clone();
+        new_doc.summary = self.summary.clone();
 
         for page in &self.pages {
             new_doc.add_page(page.to_text_only());
@@ -419,6 +460,7 @@ impl Document {
         let mut new_doc = Document::new();
         new_doc.title = self.title.clone();
         new_doc.metadata = self.metadata.clone();
+        new_doc.summary = self.summary.clone();
 
         for merged in merged_contents {
             let mut page = Page::new(merged.page_number);
@@ -453,6 +495,22 @@ impl From<Document> for DocumentConverterResult {
     }
 }
 
+/// What a conversion produces when an LLM client is configured.
+// Options are built once per conversion, so boxing the config would only make the API clunkier
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, Default)]
+pub enum ConversionMode {
+    /// Full-content extraction (default). Every page becomes markdown: pages that need
+    /// vision are transcribed by the LLM and embedded images get detailed descriptions.
+    #[default]
+    Extract,
+    /// Summarization. Pages are sent to the LLM as input (extracted text, rendered page
+    /// images, embedded images) and it writes only concise notes per page plus a document
+    /// summary, so no page is ever transcribed and output tokens stay small.
+    /// Requires an LLM client.
+    Summarize(SummaryConfig),
+}
+
 /// Options for document conversion
 #[derive(Clone)]
 pub struct ConversionOptions {
@@ -470,6 +528,8 @@ pub struct ConversionOptions {
     pub force_llm_ocr: bool,
     /// Merge tables that span multiple pages into a single table
     pub merge_multipage_tables: bool,
+    /// Full extraction (default) or summarization, see [`ConversionMode`]
+    pub mode: ConversionMode,
 }
 
 impl std::fmt::Debug for ConversionOptions {
@@ -484,6 +544,7 @@ impl std::fmt::Debug for ConversionOptions {
             .field("image_context_path", &self.image_context_path)
             .field("extract_images", &self.extract_images)
             .field("force_llm_ocr", &self.force_llm_ocr)
+            .field("mode", &self.mode)
             .finish()
     }
 }
@@ -498,6 +559,7 @@ impl Default for ConversionOptions {
             extract_images: true,
             force_llm_ocr: false,
             merge_multipage_tables: false,
+            mode: ConversionMode::Extract,
         }
     }
 }
@@ -541,6 +603,37 @@ impl ConversionOptions {
     pub fn with_merge_multipage_tables(mut self, merge: bool) -> Self {
         self.merge_multipage_tables = merge;
         self
+    }
+
+    /// Choose between full extraction (default) and summarization.
+    pub fn with_mode(mut self, mode: ConversionMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Switch to summarization mode with the given settings.
+    /// Shorthand for `with_mode(ConversionMode::Summarize(config))`.
+    pub fn with_summarization(self, config: SummaryConfig) -> Self {
+        self.with_mode(ConversionMode::Summarize(config))
+    }
+
+    /// The summarization settings, if in summarization mode
+    pub fn summary_config(&self) -> Option<&SummaryConfig> {
+        match &self.mode {
+            ConversionMode::Summarize(config) => Some(config),
+            ConversionMode::Extract => None,
+        }
+    }
+
+    /// The LLM client converters should use to describe embedded images.
+    ///
+    /// `None` in summarization mode: the summarizer looks at the images itself, so
+    /// generating detailed descriptions up front would only add output tokens.
+    pub fn image_description_llm(&self) -> Option<&SharedLlmClient> {
+        match self.mode {
+            ConversionMode::Extract => self.llm_client.as_ref(),
+            ConversionMode::Summarize(_) => None,
+        }
     }
 }
 

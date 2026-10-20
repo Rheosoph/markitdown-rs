@@ -39,6 +39,7 @@ async fn test_zip_conversion() {
         extract_images: false,
         force_llm_ocr: false,
         merge_multipage_tables: false,
+        ..Default::default()
     };
 
     let markitdown = MarkItDown::new();
@@ -64,6 +65,7 @@ async fn test_zip_bytes_conversion() {
         extract_images: false,
         force_llm_ocr: false,
         merge_multipage_tables: false,
+        ..Default::default()
     };
 
     let markitdown = MarkItDown::new();

@@ -7,11 +7,15 @@
 //! - Pages with embedded images + limited text (rendered for full context)
 //! - Poor quality OCR/extraction results (detected and re-processed via LLM)
 //!
+//! In summarization mode, pages that need vision are not transcribed: they are rendered
+//! and attached as [`Page::rendered_image`] so the summarizer can read them directly.
+//!
 //! Uses liteparse for PDF text extraction and hayro for rendering when LLM fallback is needed.
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use hayro::hayro_interpret::InterpreterSettings;
+use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::{render, RenderSettings};
 use hayro_syntax::object::dict::keys::{HEIGHT, SUBTYPE, WIDTH};
 use hayro_syntax::object::{Name, Stream};
@@ -19,11 +23,15 @@ use hayro_syntax::Pdf;
 use liteparse::types::PdfInput;
 use liteparse::{LiteParse, LiteParseConfig, OutputFormat};
 use object_store::{ObjectStore, ObjectStoreExt};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::error::MarkitdownError;
 use crate::llm::LlmClient;
-use crate::model::{ContentBlock, ConversionOptions, Document, DocumentConverter, Page};
+use crate::model::{
+    ContentBlock, ConversionOptions, Document, DocumentConverter, ExtractedImage, Page,
+};
+use crate::summarize::SummaryConfig;
 
 /// Threshold for "low text" - if page has significant images and text below this, render whole page
 /// This is set high because pages with good text extraction don't need LLM even with images
@@ -245,6 +253,13 @@ impl PageMetrics {
             && self.avg_word_length >= MIN_AVG_WORD_LENGTH
             && self.special_char_ratio <= MAX_SPECIAL_CHAR_RATIO
     }
+
+    /// Whether the summarizer should see the page image: pages that need vision anyway,
+    /// plus pages with good text but several significant images (figures, charts), since
+    /// text and image together read better than either alone
+    fn should_render_for_summary(&self) -> bool {
+        self.should_use_llm() || self.xobject_count >= MIN_SIGNIFICANT_XOBJECTS
+    }
 }
 
 /// PDF converter with smart LLM fallback for scanned/complex pages.
@@ -290,6 +305,46 @@ impl PdfConverter {
         Ok(png_data)
     }
 
+    /// Render a page for the summarizer to read: PNG on a white background (transparent
+    /// backgrounds can turn black in vision pipelines), scaled so the longest edge is about
+    /// `max_edge` pixels.
+    fn render_page_for_reading(
+        pdf: &Pdf,
+        page_index: usize,
+        max_edge: u32,
+    ) -> Result<ExtractedImage, MarkitdownError> {
+        let pages = pdf.pages();
+        let page = pages.get(page_index).ok_or_else(|| {
+            MarkitdownError::ParseError(format!("Page {} not found", page_index + 1))
+        })?;
+
+        let (width, height) = page.render_dimensions();
+        let scale = (max_edge as f32 / width.max(height).max(1.0)).clamp(0.25, 4.0);
+        let render_settings = RenderSettings {
+            x_scale: scale,
+            y_scale: scale,
+            bg_color: WHITE,
+            ..RenderSettings::default()
+        };
+
+        let pixmap = render(page, &InterpreterSettings::default(), &render_settings);
+        let (pixel_width, pixel_height) = (pixmap.width() as u32, pixmap.height() as u32);
+        let png_data = pixmap.into_png().map_err(|e| {
+            MarkitdownError::ParseError(format!("Failed to encode PDF page as PNG: {:?}", e))
+        })?;
+
+        let page_number = (page_index + 1) as u32;
+        let mut image = ExtractedImage::new(
+            format!("page_{}", page_number),
+            Bytes::from(png_data),
+            "image/png",
+        );
+        image.width = Some(pixel_width);
+        image.height = Some(pixel_height);
+        image.page_number = Some(page_number);
+        Ok(image)
+    }
+
     /// Parse PDF using hayro
     fn parse_pdf(bytes: &[u8]) -> Result<Pdf, MarkitdownError> {
         let data: Arc<dyn AsRef<[u8]> + Send + Sync> = Arc::new(bytes.to_vec());
@@ -315,6 +370,27 @@ impl PdfConverter {
         })?;
 
         Ok(result.pages.into_iter().map(|page| page.text).collect())
+    }
+
+    /// Open the PDF structure with hayro and extract per-page text with liteparse.
+    ///
+    /// Either source alone is enough to continue. If neither can read the file it is
+    /// corrupt (e.g. a truncated upload) or not a PDF at all, so report that instead of
+    /// producing a placeholder document.
+    async fn load_pdf(bytes: &[u8]) -> Result<(Option<Pdf>, Vec<String>), MarkitdownError> {
+        let pdf = Self::parse_pdf(bytes);
+        let actual_page_count = pdf.as_ref().map(|p| p.pages().len()).unwrap_or(0);
+
+        if actual_page_count > 0 {
+            let page_texts = Self::extract_text_aligned_to_pages(bytes, actual_page_count).await;
+            return Ok((pdf.ok(), page_texts));
+        }
+
+        match (pdf, Self::extract_text_by_page(bytes).await) {
+            (pdf, Ok(page_texts)) => Ok((pdf.ok(), page_texts)),
+            (Ok(pdf), Err(_)) => Ok((Some(pdf), Vec::new())),
+            (Err(e), Err(_)) => Err(e),
+        }
     }
 
     /// Extract text aligned to actual PDF page count
@@ -464,29 +540,20 @@ impl PdfConverter {
         }
     }
 
-    /// Convert PDF with optional LLM fallback for complex/scanned pages
+    /// Convert PDF with optional LLM fallback for complex/scanned pages.
+    ///
+    /// With `summary` set (summarization mode), pages that need vision are rendered and
+    /// attached as `rendered_image` instead of being transcribed by the LLM.
     async fn convert_with_llm(
         &self,
         bytes: &[u8],
         llm_client: Option<&dyn LlmClient>,
         force_llm: bool,
+        summary: Option<&SummaryConfig>,
     ) -> Result<Document, MarkitdownError> {
-        // Try to parse PDF structure first to get accurate page count
-        let pdf = Self::parse_pdf(bytes).ok();
-        let actual_page_count = pdf.as_ref().map(|p| p.pages().len()).unwrap_or(0);
-
-        // Get text aligned to actual page count if we have it
-        let page_texts = if actual_page_count > 0 {
-            Self::extract_text_aligned_to_pages(bytes, actual_page_count).await
-        } else {
-            Self::extract_text_by_page(bytes).await.unwrap_or_default()
-        };
-
-        let page_count = if actual_page_count > 0 {
-            actual_page_count
-        } else {
-            page_texts.len()
-        };
+        // Text is aligned to the real page count whenever hayro could read the structure
+        let (pdf, page_texts) = Self::load_pdf(bytes).await?;
+        let page_count = page_texts.len();
 
         // Analyze which pages need LLM processing
         let mut page_metrics: Vec<(usize, PageMetrics)> = Vec::with_capacity(page_count);
@@ -500,8 +567,13 @@ impl PdfConverter {
                 .unwrap_or(0);
 
             let metrics = PageMetrics::from_text_with_xobjects(page_text, xobject_count);
-            let needs_llm =
-                (force_llm || metrics.should_use_llm()) && llm_client.is_some() && pdf.is_some();
+            let wants_vision = force_llm
+                || if summary.is_some() {
+                    metrics.should_render_for_summary()
+                } else {
+                    metrics.should_use_llm()
+                };
+            let needs_llm = wants_vision && llm_client.is_some() && pdf.is_some();
 
             if needs_llm {
                 pages_needing_llm.push(idx);
@@ -509,28 +581,49 @@ impl PdfConverter {
             page_metrics.push((idx, metrics));
         }
 
-        // Batch render and process pages that need LLM
-        let llm_results = if !pages_needing_llm.is_empty() {
-            if let (Some(llm), Some(ref pdf_ref)) = (llm_client, &pdf) {
-                Self::batch_llm_convert(&pages_needing_llm, pdf_ref, llm).await
-            } else {
-                std::collections::HashMap::new()
+        // Pages that need vision are transcribed, or in summarization mode rendered so the
+        // summarizer can read the page images directly
+        let mut llm_results = HashMap::new();
+        let mut renders = HashMap::new();
+        if let (Some(llm), Some(pdf_ref)) = (llm_client, &pdf) {
+            if !pages_needing_llm.is_empty() {
+                match summary {
+                    Some(config) => {
+                        for &idx in &pages_needing_llm {
+                            // Pages that also send their text layer need less resolution:
+                            // the text carries the exact wording
+                            let max_edge = if page_metrics[idx].1.is_high_quality() {
+                                config.page_image_max_edge * 4 / 5
+                            } else {
+                                config.page_image_max_edge
+                            };
+                            // A page that fails to render keeps its text, if any
+                            if let Ok(image) = Self::render_page_for_reading(pdf_ref, idx, max_edge)
+                            {
+                                renders.insert(idx, image);
+                            }
+                        }
+                    }
+                    None => {
+                        llm_results =
+                            Self::batch_llm_convert(&pages_needing_llm, pdf_ref, llm).await;
+                    }
+                }
             }
-        } else {
-            std::collections::HashMap::new()
-        };
+        }
 
         // Build document with results
         let mut document = Document::new();
 
         for (idx, metrics) in page_metrics {
             let mut page = Page::new((idx + 1) as u32);
+            let render = renders.remove(&idx);
 
             // Check if we have LLM result for this page
             if let Some(Some(markdown)) = llm_results.get(&idx) {
                 page.add_content(ContentBlock::Markdown(markdown.clone()));
-            } else if !metrics.text.is_empty() {
-                // Use extracted text
+            } else if !metrics.text.is_empty() && (render.is_none() || metrics.is_high_quality()) {
+                // Use extracted text (next to a page render only when it is reliable)
                 if !metrics.is_high_quality() && llm_client.is_none() {
                     page.add_content(ContentBlock::Text(format!(
                         "[Note: Text extraction quality may be poor]\n\n{}",
@@ -541,13 +634,18 @@ impl PdfConverter {
                 }
             }
 
-            if !page.content.is_empty() {
+            if let Some(image) = render {
+                page.rendered_image = Some(image);
+            }
+
+            if !page.content.is_empty() || page.rendered_image.is_some() {
                 document.add_page(page);
             }
         }
 
-        // Handle empty document case
-        if document.pages.is_empty() && page_count > 0 {
+        // Handle empty document case (summarization mode already rendered every page that
+        // lacked usable text, so retrying would not help)
+        if document.pages.is_empty() && page_count > 0 && summary.is_none() {
             Self::try_llm_fallback_for_all_pages(&mut document, page_count, llm_client, &pdf).await;
         }
 
@@ -634,16 +732,8 @@ impl PdfConverter {
 
     /// Basic conversion without LLM (original behavior)
     async fn convert_basic(&self, bytes: &[u8]) -> Result<Document, MarkitdownError> {
-        // Try to get actual page count from PDF structure
-        let pdf = Self::parse_pdf(bytes).ok();
+        let (pdf, page_texts) = Self::load_pdf(bytes).await?;
         let actual_page_count = pdf.as_ref().map(|p| p.pages().len()).unwrap_or(0);
-
-        // Get text aligned to actual pages if possible
-        let page_texts = if actual_page_count > 0 {
-            Self::extract_text_aligned_to_pages(bytes, actual_page_count).await
-        } else {
-            Self::extract_text_by_page(bytes).await.unwrap_or_default()
-        };
 
         let mut document = Document::new();
 
@@ -714,7 +804,7 @@ impl DocumentConverter for PdfConverter {
             if let Some(llm) = &opts.llm_client {
                 let force_llm = opts.force_llm_ocr;
                 return self
-                    .convert_with_llm(&bytes, Some(llm.as_ref()), force_llm)
+                    .convert_with_llm(&bytes, Some(llm.as_ref()), force_llm, opts.summary_config())
                     .await;
             }
         }
@@ -743,7 +833,7 @@ impl DocumentConverter for PdfConverter {
             if let Some(llm) = &opts.llm_client {
                 let force_llm = opts.force_llm_ocr;
                 return self
-                    .convert_with_llm(&bytes, Some(llm.as_ref()), force_llm)
+                    .convert_with_llm(&bytes, Some(llm.as_ref()), force_llm, opts.summary_config())
                     .await;
             }
         }

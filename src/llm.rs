@@ -20,6 +20,7 @@
 
 use async_trait::async_trait;
 use base64::prelude::*;
+use bytes::Bytes;
 use futures::future::join_all;
 use futures::FutureExt;
 use image::ImageFormat;
@@ -28,8 +29,10 @@ use rig::{
     message::{ImageDetail, ImageMediaType, Message, ReasoningContent, UserContent},
     OneOrMany,
 };
+use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::error::MarkitdownError;
@@ -47,8 +50,13 @@ pub struct LlmConfig {
     pub page_conversion_prompt: String,
     /// System prompt for batch image description (when images_per_message > 1)
     pub batch_image_prompt: String,
-    /// Temperature for LLM responses (0.0 = deterministic, 1.0 = creative)
-    pub temperature: f64,
+    /// Temperature for LLM responses (0.0 = deterministic, 1.0 = creative).
+    /// `None` sends no temperature, so the provider's default applies.
+    ///
+    /// Some models accept only their default temperature (reasoning models, for example).
+    /// When a request is rejected because of its temperature, [`LlmWrapper`] retries it
+    /// without one and leaves the temperature out of later requests.
+    pub temperature: Option<f64>,
     /// Number of images to send per LLM message for parallelization
     /// Default: 1 (one image per request)
     pub images_per_message: usize,
@@ -78,7 +86,7 @@ impl Default for LlmConfig {
             image_description_prompt: DEFAULT_IMAGE_DESCRIPTION_PROMPT.to_string(),
             page_conversion_prompt: DEFAULT_PAGE_CONVERSION_PROMPT.to_string(),
             batch_image_prompt: DEFAULT_BATCH_IMAGE_PROMPT.to_string(),
-            temperature: 0.1, // Low temperature for accurate extraction with minimal repetition
+            temperature: Some(0.1), // Low temperature for accurate extraction with minimal repetition
             images_per_message: 1,
             pages_per_batch: 4, // Process 4 pages concurrently by default
             max_tokens: None, // Let model use its natural limit; set explicitly for unreliable models
@@ -112,7 +120,14 @@ impl LlmConfig {
 
     /// Set the temperature
     pub fn with_temperature(mut self, temp: f64) -> Self {
-        self.temperature = temp.clamp(0.0, 2.0);
+        self.temperature = Some(temp.clamp(0.0, 2.0));
+        self
+    }
+
+    /// Send no temperature, so the provider's default applies. Use this for models whose
+    /// documentation recommends their default (such as Gemini 3).
+    pub fn without_temperature(mut self) -> Self {
+        self.temperature = None;
         self
     }
 
@@ -135,6 +150,70 @@ impl LlmConfig {
         self.max_tokens = tokens;
         self
     }
+}
+
+/// One piece of a multimodal prompt. Parts are sent in order, so text and images can be
+/// interleaved (e.g. a page label, then the page text, then the rendered page image).
+#[derive(Debug, Clone)]
+pub enum PromptPart {
+    /// Plain text (may contain markdown or XML-style tags)
+    Text(String),
+    /// An image. Formats the provider cannot accept are replaced by a short text placeholder.
+    Image {
+        data: Bytes,
+        mime_type: String,
+        /// Request high-detail processing (used for rendered document pages)
+        high_detail: bool,
+    },
+}
+
+impl PromptPart {
+    /// Create a text part
+    pub fn text(text: impl Into<String>) -> Self {
+        PromptPart::Text(text.into())
+    }
+
+    /// Create an image part with automatic detail selection
+    pub fn image(data: Bytes, mime_type: impl Into<String>) -> Self {
+        PromptPart::Image {
+            data,
+            mime_type: mime_type.into(),
+            high_detail: false,
+        }
+    }
+}
+
+/// Token usage reported by the LLM provider, summed over one or more requests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    /// Number of LLM requests made
+    pub requests: u64,
+    /// Input (prompt) tokens, including image tokens
+    pub input_tokens: u64,
+    /// Output (completion) tokens
+    pub output_tokens: u64,
+}
+
+impl TokenUsage {
+    /// Input plus output tokens
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens + self.output_tokens
+    }
+}
+
+impl std::ops::AddAssign for TokenUsage {
+    fn add_assign(&mut self, other: Self) {
+        self.requests += other.requests;
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+    }
+}
+
+/// Text response of an LLM request together with its token usage.
+#[derive(Debug, Clone, Default)]
+pub struct LlmResponse {
+    pub text: String,
+    pub usage: TokenUsage,
 }
 
 /// Trait for LLM clients that can describe images and convert pages.
@@ -197,6 +276,37 @@ pub trait LlmClient: Send + Sync {
     /// Generate a text completion
     async fn complete(&self, prompt: &str) -> Result<String, MarkitdownError>;
 
+    /// Run a prompt made of ordered text and image parts under the given system prompt.
+    ///
+    /// Used by summarization mode to read several pages (text, page renders, embedded
+    /// images) in one request. `max_tokens` overrides the configured output limit.
+    ///
+    /// The default implementation sends only the text parts through [`complete`](Self::complete)
+    /// and reports no token counts; clients with vision support should override it.
+    async fn complete_multimodal(
+        &self,
+        system_prompt: &str,
+        parts: &[PromptPart],
+        _max_tokens: Option<u64>,
+    ) -> Result<LlmResponse, MarkitdownError> {
+        let mut prompt = system_prompt.to_string();
+        for part in parts {
+            prompt.push('\n');
+            match part {
+                PromptPart::Text(text) => prompt.push_str(text),
+                PromptPart::Image { .. } => prompt.push_str("[Image omitted]"),
+            }
+        }
+        let text = self.complete(&prompt).await?;
+        Ok(LlmResponse {
+            text,
+            usage: TokenUsage {
+                requests: 1,
+                ..TokenUsage::default()
+            },
+        })
+    }
+
     /// Get the current configuration
     fn config(&self) -> &LlmConfig;
 
@@ -230,28 +340,28 @@ pub trait LlmClient: Send + Sync {
 pub struct LlmWrapper<M: CompletionModel> {
     model: Arc<M>,
     config: LlmConfig,
+    /// Set once the model rejected the configured temperature; later requests omit it
+    omit_temperature: AtomicBool,
 }
 
 impl<M: CompletionModel> LlmWrapper<M> {
     /// Create a new LLM wrapper with default configuration
     pub fn new(model: M) -> Self {
-        Self {
-            model: Arc::new(model),
-            config: LlmConfig::default(),
-        }
+        Self::with_config(model, LlmConfig::default())
     }
 
     /// Create a new LLM wrapper with custom configuration
     pub fn with_config(model: M, config: LlmConfig) -> Self {
-        Self {
-            model: Arc::new(model),
-            config,
-        }
+        Self::from_arc(Arc::new(model), config)
     }
 
     /// Create from an Arc'd model
     pub fn from_arc(model: Arc<M>, config: LlmConfig) -> Self {
-        Self { model, config }
+        Self {
+            model,
+            config,
+            omit_temperature: AtomicBool::new(false),
+        }
     }
 
     /// Get a reference to the underlying model
@@ -270,13 +380,17 @@ impl<M: CompletionModel> LlmWrapper<M> {
         system_prompt: &str,
         user_content: OneOrMany<UserContent>,
     ) -> CompletionRequestBuilder<M> {
+        let temperature = self
+            .config
+            .temperature
+            .filter(|_| !self.omit_temperature.load(Ordering::Relaxed));
         let mut builder = self
             .model
             .completion_request(system_prompt)
             .messages(vec![Message::User {
                 content: user_content,
             }])
-            .temperature(self.config.temperature);
+            .temperature_opt(temperature);
 
         if let Some(max_tokens) = self.config.max_tokens {
             builder = builder.max_tokens(max_tokens);
@@ -285,9 +399,35 @@ impl<M: CompletionModel> LlmWrapper<M> {
         builder
     }
 
-    /// Send a request and extract the response text, with post-processing for repetition detection.
+    /// Send a request and return the raw assistant content with its token usage.
+    ///
+    /// A request rejected because of its temperature (models that accept only their
+    /// default) is retried once without it, and later requests leave it out.
+    async fn send_raw(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<(OneOrMany<AssistantContent>, TokenUsage), MarkitdownError> {
+        let retry = request.temperature.is_some().then(|| {
+            let mut retry = request.clone();
+            retry.temperature = None;
+            retry
+        });
+
+        match (self.complete_once(request).await, retry) {
+            (Err(error), Some(retry)) if is_temperature_rejection(&error) => {
+                self.omit_temperature.store(true, Ordering::Relaxed);
+                self.complete_once(retry).await
+            }
+            (result, _) => result,
+        }
+    }
+
+    /// Send a request once.
     /// Uses catch_unwind to handle panics from rig-core on invalid API responses (e.g. 400 errors).
-    async fn send_request(&self, request: CompletionRequest) -> Result<String, MarkitdownError> {
+    async fn complete_once(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<(OneOrMany<AssistantContent>, TokenUsage), MarkitdownError> {
         let response = AssertUnwindSafe(self.model.completion(request))
             .catch_unwind()
             .await
@@ -301,11 +441,24 @@ impl<M: CompletionModel> LlmWrapper<M> {
                 };
                 MarkitdownError::LlmError(format!("LLM completion panicked: {}", msg))
             })?
-            .map(|r| extract_text_from_response(&r.choice))
             .map_err(|e| MarkitdownError::LlmError(format!("LLM error: {}", e)))?;
 
+        let usage = TokenUsage {
+            requests: 1,
+            input_tokens: response.usage.input_tokens,
+            output_tokens: response.usage.output_tokens,
+        };
+        Ok((response.choice, usage))
+    }
+
+    /// Send a request and extract the response text, with post-processing for repetition detection.
+    async fn send_request(&self, request: CompletionRequest) -> Result<String, MarkitdownError> {
+        let (choice, _) = self.send_raw(request).await?;
+
         // Apply repetition detection and cleanup
-        Ok(detect_and_truncate_repetition(&response))
+        Ok(detect_and_truncate_repetition(&extract_text_from_response(
+            &choice,
+        )))
     }
 
     /// Describe a single ExtractedImage with context-aware prompts
@@ -465,6 +618,32 @@ impl<M: CompletionModel> LlmWrapper<M> {
         }
 
         Ok(all_descriptions)
+    }
+}
+
+/// Whether an LLM error rejects the temperature parameter, such as OpenAI's "Unsupported
+/// value: 'temperature' does not support 0.1 with this model"
+fn is_temperature_rejection(error: &MarkitdownError) -> bool {
+    error.to_string().to_lowercase().contains("temperature")
+}
+
+/// Extract the answer text, ignoring reasoning content unless the model returned nothing else.
+fn extract_answer_text(content: &OneOrMany<AssistantContent>) -> String {
+    let answer = content
+        .iter()
+        .filter_map(|c| match c {
+            AssistantContent::Text(text) if !text.text.trim().is_empty() => {
+                Some(text.text.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if answer.is_empty() {
+        extract_text_from_response(content)
+    } else {
+        answer
     }
 }
 
@@ -666,6 +845,11 @@ fn parse_mime_to_image_type(mime_type: &str) -> Option<ImageMediaType> {
         "image/webp" => Some(ImageMediaType::WEBP),
         _ => None, // Unsupported formats like EMF/WMF return None
     }
+}
+
+/// Whether an image in this format can be sent to the LLM, directly or after conversion to PNG
+pub(crate) fn can_send_image(mime_type: &str) -> bool {
+    parse_mime_to_image_type(mime_type).is_some() || is_convertible_format(mime_type)
 }
 
 /// Check if a MIME type can be converted to a supported format.
@@ -1004,6 +1188,86 @@ impl<M: CompletionModel + Send + Sync + 'static> LlmClient for LlmWrapper<M> {
         self.send_request(request).await
     }
 
+    async fn complete_multimodal(
+        &self,
+        system_prompt: &str,
+        parts: &[PromptPart],
+        max_tokens: Option<u64>,
+    ) -> Result<LlmResponse, MarkitdownError> {
+        let mut contents: Vec<UserContent> = Vec::with_capacity(parts.len());
+        // Adjacent text parts are merged so the provider receives fewer, larger text blocks
+        let mut pending_text = String::new();
+
+        for part in parts {
+            let image = match part {
+                PromptPart::Text(text) => {
+                    if !pending_text.is_empty() {
+                        pending_text.push('\n');
+                    }
+                    pending_text.push_str(text);
+                    continue;
+                }
+                PromptPart::Image {
+                    data,
+                    mime_type,
+                    high_detail,
+                } => {
+                    let detail = if *high_detail {
+                        ImageDetail::High
+                    } else {
+                        ImageDetail::Auto
+                    };
+                    match prepare_image_for_llm(data, mime_type) {
+                        PreparedImage::Ready(media_type) => Ok(UserContent::image_base64(
+                            BASE64_STANDARD.encode(data),
+                            Some(media_type),
+                            Some(detail),
+                        )),
+                        PreparedImage::Converted(png_data) => Ok(UserContent::image_base64(
+                            BASE64_STANDARD.encode(&png_data),
+                            Some(ImageMediaType::PNG),
+                            Some(detail),
+                        )),
+                        PreparedImage::Unsupported(reason) => Err(reason),
+                    }
+                }
+            };
+
+            match image {
+                Ok(content) => {
+                    if !pending_text.is_empty() {
+                        contents.push(UserContent::text(std::mem::take(&mut pending_text)));
+                    }
+                    contents.push(content);
+                }
+                Err(reason) => {
+                    if !pending_text.is_empty() {
+                        pending_text.push('\n');
+                    }
+                    pending_text.push_str(&format!("[Image skipped: {}]", reason));
+                }
+            }
+        }
+        if !pending_text.is_empty() {
+            contents.push(UserContent::text(pending_text));
+        }
+
+        let content = OneOrMany::many(contents).map_err(|_| {
+            MarkitdownError::LlmError("Multimodal prompt must contain at least one part".into())
+        })?;
+
+        let mut builder = self.build_request(system_prompt, content);
+        if let Some(max_tokens) = max_tokens {
+            builder = builder.max_tokens(max_tokens);
+        }
+
+        let (choice, usage) = self.send_raw(builder.build()).await?;
+        Ok(LlmResponse {
+            text: detect_and_truncate_repetition(&extract_answer_text(&choice)),
+            usage,
+        })
+    }
+
     fn config(&self) -> &LlmConfig {
         &self.config
     }
@@ -1323,5 +1587,118 @@ mod tests {
         // Short text should be returned as-is
         let short = "Hello world";
         assert_eq!(detect_and_truncate_repetition(short), short);
+    }
+
+    use rig::completion::Usage;
+    use rig::test_utils::{MockCompletionModel, MockTurn};
+
+    const TEMPERATURE_REJECTED: &str = "Unsupported value: 'temperature' does not support 0.1 \
+                                        with this model. Only the default (1) value is supported.";
+
+    fn temperatures(model: &MockCompletionModel) -> Vec<Option<f64>> {
+        model.requests().iter().map(|r| r.temperature).collect()
+    }
+
+    #[tokio::test]
+    async fn rejected_temperature_is_retried_without_it_and_then_omitted() {
+        let model = MockCompletionModel::new([
+            MockTurn::error(TEMPERATURE_REJECTED),
+            MockTurn::text("first"),
+            MockTurn::text("second"),
+        ]);
+        let llm = LlmWrapper::new(model.clone());
+
+        assert_eq!(llm.complete("hello").await.unwrap(), "first");
+        assert_eq!(llm.complete("again").await.unwrap(), "second");
+        assert_eq!(temperatures(&model), vec![Some(0.1), None, None]);
+    }
+
+    #[tokio::test]
+    async fn other_errors_are_not_retried() {
+        let model =
+            MockCompletionModel::new([MockTurn::error("rate limit"), MockTurn::text("unused")]);
+        let llm = LlmWrapper::new(model.clone());
+
+        assert!(llm.complete("hello").await.is_err());
+        assert_eq!(model.request_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn temperature_can_be_left_to_the_provider() {
+        let config = LlmConfig::default().without_temperature();
+
+        let model = MockCompletionModel::new([MockTurn::text("ok")]);
+        let llm = LlmWrapper::with_config(model.clone(), config.clone());
+        llm.complete("hello").await.unwrap();
+        assert_eq!(temperatures(&model), vec![None]);
+
+        // Without a temperature, an error mentioning it is not retried
+        let model = MockCompletionModel::new([MockTurn::error(TEMPERATURE_REJECTED)]);
+        let llm = LlmWrapper::with_config(model.clone(), config);
+        assert!(llm.complete("hello").await.is_err());
+        assert_eq!(model.request_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn complete_multimodal_sends_parts_in_order_and_reports_usage() {
+        let mut usage = Usage::new();
+        usage.input_tokens = 1_200;
+        usage.output_tokens = 85;
+        let turn = MockTurn::from_contents([
+            AssistantContent::reasoning("thinking that must not leak into the answer"),
+            AssistantContent::text("<notes page=\"1\">- A note</notes>"),
+        ])
+        .unwrap()
+        .with_usage(usage);
+        let model = MockCompletionModel::new([turn]);
+        let llm = LlmWrapper::new(model.clone());
+
+        let parts = vec![
+            PromptPart::text("<page number=\"1\">"),
+            PromptPart::Image {
+                data: Bytes::from_static(b"png bytes"),
+                mime_type: "image/png".to_string(),
+                high_detail: true,
+            },
+            PromptPart::text("Page text"),
+            PromptPart::image(Bytes::from_static(b"emf bytes"), "image/emf"),
+            PromptPart::text("</page>"),
+        ];
+        let response = llm
+            .complete_multimodal("System rules", &parts, Some(500))
+            .await
+            .unwrap();
+
+        assert_eq!(response.text, "<notes page=\"1\">- A note</notes>");
+        assert_eq!(
+            response.usage,
+            TokenUsage {
+                requests: 1,
+                input_tokens: 1_200,
+                output_tokens: 85
+            }
+        );
+
+        let request = &model.requests()[0];
+        assert_eq!(request.max_tokens, Some(500));
+        let Message::User { content } = request.chat_history.first_ref() else {
+            panic!("expected the user content first");
+        };
+        let content: Vec<&UserContent> = content.iter().collect();
+        assert_eq!(content.len(), 3, "adjacent text parts are merged");
+        assert!(matches!(content[0], UserContent::Text(t) if t.text == "<page number=\"1\">"));
+        assert!(matches!(
+            content[1],
+            UserContent::Image(image) if image.detail == Some(ImageDetail::High)
+        ));
+        match content[2] {
+            UserContent::Text(t) => {
+                assert!(t
+                    .text
+                    .starts_with("Page text\n[Image skipped: Windows Metafile"));
+                assert!(t.text.ends_with("\n</page>"));
+            }
+            other => panic!("expected merged text, got {:?}", other),
+        }
     }
 }

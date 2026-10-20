@@ -15,6 +15,7 @@ A high-performance Rust library that converts **40+ document formats** to clean,
 - **Archive Extraction**: Automatically extract and convert ZIP, TAR, GZIP, and more
 - **Image Extraction**: Optional intelligent image extraction with LLM-powered descriptions
 - **LLM Integration**: Works with OpenAI, Gemini, Claude, Cohere, and custom providers
+- **Summarization Mode**: Page notes and a cited summary instead of a full transcription, at a fraction of the output tokens
 - **Streaming Support**: Process large files efficiently
 - **Rich Output Structure**: Preserves pagination, images, tables, and metadata
 - **Production-Ready**: Comprehensive test suite with 198+ passing tests
@@ -279,6 +280,60 @@ If any of them are missing, the LLM test is skipped.
 - Cohere (command-r-plus, etc.)
 - Any custom provider implementing `CompletionModel`
 
+**Temperature:** requests use a low temperature (0.1) by default for faithful extraction. Some models accept only their default temperature, reasoning models for example. If a request is rejected because of its temperature, it is retried without one, and later requests leave it out. To always use the provider's default, use `LlmConfig::default().without_temperature()`. Google recommends this for Gemini 3, where temperatures below 1.0 can cause looping.
+
+#### Summarize Documents with an LLM
+
+By default, conversion runs in **extraction mode**: every page that needs vision is transcribed by the LLM and every embedded image gets a detailed description, so the LLM *generates* about as many tokens as the document contains. **Summarization mode** turns this around. Pages go to the LLM as *input* (extracted text, rendered page images, embedded images), and the LLM writes only short notes per page plus a summary. Output tokens cost several times more than input tokens and dominate latency, so this is much cheaper and faster when you need to understand a document rather than reproduce it.
+
+```rust
+use markitdown::{ConversionOptions, MarkItDown, SummaryConfig};
+
+let options = ConversionOptions::default()
+    .with_llm(llm) // any client from create_llm_client
+    .with_summarization(
+        SummaryConfig::default()
+            .with_focus("financial risks") // optional
+            .with_language("English"),     // default: the document's language
+    );
+
+let doc = MarkItDown::new().convert("annual_report.pdf", Some(options)).await?;
+
+let summary = doc.summary.as_ref().unwrap();
+println!("{}", summary.summary);
+for point in &summary.key_points {
+    println!("- {}", point); // e.g. "Revenue grew 12% to €4.1M [p. 7]"
+}
+
+// Each page now holds the LLM's notes for that page instead of its full content
+for page in &doc.pages {
+    println!("Page {}:\n{}", page.page_number, page.to_markdown());
+}
+
+println!(
+    "{} requests, {} input / {} output tokens",
+    summary.usage.requests, summary.usage.input_tokens, summary.usage.output_tokens
+);
+
+// Or everything as markdown: summary, key points, then the notes per page
+let markdown = doc.to_markdown();
+```
+
+How it works:
+
+1. **Read.** Pages are packed into windows of about 10 pages or 16K tokens. Pages with good text are sent as text, scanned pages as images, and pages with figures as both. Embedded images from DOCX, PPTX and similar formats are sent with their page, so they are never described one by one. For each window, the LLM writes concise notes per page, most important first. Notes get shorter per page for long documents so that they all fit the final step.
+2. **Reduce.** If the notes still exceed the final step's budget, the least important points are dropped first. Only if that is not enough are notes condensed hierarchically, at most two levels.
+3. **Summarize.** One final request writes the summary and key points, with page citations.
+
+A document that fits in one window is read and summarized in a single request. Running headers and footers are removed before reading. With `with_force_llm_ocr(true)`, every PDF page is also sent as an image.
+
+| Strategy | Behavior |
+|---|---|
+| `SummaryStrategy::MapReduce` *(default)* | Windows are read concurrently. Fastest. |
+| `SummaryStrategy::Sequential` | Windows are read in order, and each receives a running summary of the pages before it (Chain of Agents). Slower, but better for narratives and documents that build on themselves. |
+
+The design follows current long-document summarization research: per-page gists (ReadAgent), parallel map-reduce vs. sequential agents (Chain of Agents), pruning before hierarchical merging to avoid compounding hallucinations, and sending both text and page image where layout matters. `SummaryConfig` exposes the budgets (`summary_words`, `max_key_points`, `note_words_per_page`, window sizes, `max_notes_tokens`), concurrency, retries and all four system prompts. Summarization mode requires an LLM client; scanned pages and images need a vision-capable model. See `examples/summarize_pdf.rs`.
+
 #### Convert from Bytes
 
 ```rust
@@ -467,6 +522,7 @@ For detailed information, see:
 - [CLI Usage](#command-line) – Command-line tool guide
 - [Adding Formats](#register-a-custom-converter) – Extend with custom converters
 - [LLM Integration](#convert-with-llm-for-image-descriptions) – Use AI for image descriptions
+- [Summarization Mode](#summarize-documents-with-an-llm) – Notes and a summary instead of a full transcription
 
 ## Acknowledgments
 

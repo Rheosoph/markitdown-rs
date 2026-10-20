@@ -176,7 +176,7 @@ impl DocumentConverter for DocxConverter {
 
         // If LLM client is provided, get descriptions for all images
         if let Some(ref opts) = options {
-            if let Some(ref llm_client) = opts.llm_client {
+            if let Some(llm_client) = opts.image_description_llm() {
                 if let Some(path) = opts.image_context_path.as_deref() {
                     document.apply_image_context_path(path);
                 }
@@ -210,7 +210,7 @@ impl DocumentConverter for DocxConverter {
 
         // If LLM client is provided, get descriptions for all images
         if let Some(ref opts) = options {
-            if let Some(ref llm_client) = opts.llm_client {
+            if let Some(llm_client) = opts.image_description_llm() {
                 if let Some(path) = opts.image_context_path.as_deref() {
                     document.apply_image_context_path(path);
                 }
