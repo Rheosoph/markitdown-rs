@@ -562,55 +562,33 @@ impl DocumentConverter for ZstdConverter {
 pub struct SevenZipConverter;
 
 impl SevenZipConverter {
+    /// Entries are decoded in memory and never written to disk: entry names come from the
+    /// archive, and `../` or absolute names would escape any extraction directory.
     fn extract_7z(bytes: &[u8]) -> Result<ArchiveExtractionResult, MarkitdownError> {
-        use std::io::Write;
-
-        // sevenz-rust needs a file path, so write to temp file
-        let mut temp_file = tempfile::NamedTempFile::new()
-            .map_err(|e| MarkitdownError::ParseError(format!("Temp file error: {}", e)))?;
-        temp_file
-            .write_all(bytes)
-            .map_err(|e| MarkitdownError::ParseError(format!("Write error: {}", e)))?;
-
-        let temp_dir = tempfile::TempDir::new()
-            .map_err(|e| MarkitdownError::ParseError(format!("Temp dir error: {}", e)))?;
-
-        sevenz_rust::decompress_file(temp_file.path(), temp_dir.path())
-            .map_err(|e| MarkitdownError::ParseError(format!("7z decompress error: {}", e)))?;
+        let mut reader =
+            sevenz_rust2::ArchiveReader::new(Cursor::new(bytes), sevenz_rust2::Password::empty())
+                .map_err(|e| MarkitdownError::ParseError(format!("7z parse error: {}", e)))?;
 
         let mut result = ArchiveExtractionResult::new();
-
-        // Walk the extracted directory
-        fn walk_dir(
-            dir: &std::path::Path,
-            base: &std::path::Path,
-            result: &mut ArchiveExtractionResult,
-        ) {
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        walk_dir(&path, base, result);
-                    } else {
-                        result.total_files += 1;
-                        let rel_path = path
-                            .strip_prefix(base)
-                            .map(|p| p.to_string_lossy().to_string())
-                            .unwrap_or_else(|_| path.to_string_lossy().to_string());
-
-                        if let Ok(contents) = std::fs::read(&path) {
-                            *result = ZipConverter::process_file(
-                                std::mem::take(result),
-                                &rel_path,
-                                &contents,
-                            );
-                        }
-                    }
+        reader
+            .for_each_entries(|entry, data| {
+                // Solid archives decode entries as one stream, so every entry is read in order
+                let mut contents = Vec::new();
+                data.read_to_end(&mut contents)?;
+                if entry.is_directory() || entry.is_anti_item() {
+                    return Ok(true);
                 }
-            }
-        }
 
-        walk_dir(temp_dir.path(), temp_dir.path(), &mut result);
+                result.total_files += 1;
+                result = ZipConverter::process_file(
+                    std::mem::take(&mut result),
+                    entry.name(),
+                    &contents,
+                );
+                Ok(true)
+            })
+            .map_err(|e| MarkitdownError::ParseError(format!("7z decompress error: {}", e)))?;
+
         Ok(result)
     }
 }
