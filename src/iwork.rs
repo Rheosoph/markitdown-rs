@@ -49,7 +49,7 @@ impl PagesConverter {
         // Try to extract text from Index files (older format)
         for i in 0..archive.len() {
             if let Ok(mut file) = archive.by_index(i) {
-                let name = file.name().to_string();
+                let name = file.name().unwrap_or_default().into_owned();
 
                 // Look for text content in various locations
                 if name.ends_with(".txt") || name.contains("Text") {
@@ -81,7 +81,7 @@ impl PagesConverter {
 
             for i in 0..archive.len() {
                 if let Ok(mut file) = archive.by_index(i) {
-                    let name = file.name().to_string();
+                    let name = file.name().unwrap_or_default().into_owned();
 
                     if name.ends_with(".iwa") {
                         let mut data = Vec::new();
@@ -116,7 +116,9 @@ impl PagesConverter {
         markdown.push_str("---\n\n**Archive Contents:**\n");
         for i in 0..archive.len() {
             if let Ok(file) = archive.by_index(i) {
-                markdown.push_str(&format!("- `{}`\n", file.name()));
+                if let Ok(name) = file.name() {
+                    markdown.push_str(&format!("- `{}`\n", name));
+                }
             }
         }
 

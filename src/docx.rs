@@ -111,7 +111,7 @@ impl DocxConverter {
 
         for i in 0..archive.len() {
             let mut file = archive.by_index(i)?;
-            let name = file.name().to_string();
+            let name = file.name()?.into_owned();
 
             // Check if this is an image file in the media folder
             if name.starts_with("word/media/") {

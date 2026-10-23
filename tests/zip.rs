@@ -3,12 +3,12 @@ use markitdown::{model::ConversionOptions, MarkItDown};
 use std::fs;
 use std::io::{Cursor, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
-use zip::write::FileOptions;
+use zip::write::SimpleFileOptions;
 
 fn build_test_zip_bytes() -> Vec<u8> {
     let mut buffer = Cursor::new(Vec::new());
     let mut writer = zip::ZipWriter::new(&mut buffer);
-    let options: FileOptions<'_, ()> = FileOptions::default();
+    let options = SimpleFileOptions::default();
 
     writer
         .start_file("sample.txt", options)

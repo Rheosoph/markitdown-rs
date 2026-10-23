@@ -61,7 +61,7 @@ impl PptxConverter {
 
         for i in 0..archive.len() {
             if let Ok(mut file) = archive.by_index(i) {
-                let name = file.name().to_string();
+                let name = file.name().unwrap_or_default().into_owned();
                 if name.starts_with("ppt/media/") {
                     let mut data = Vec::new();
                     if file.read_to_end(&mut data).is_ok() {
@@ -421,7 +421,10 @@ impl PptxConverter {
             let file = archive
                 .by_index(i)
                 .map_err(|e| MarkitdownError::Zip(format!("Failed to access ZIP: {}", e)))?;
-            let name = file.name().to_string();
+            let name = file
+                .name()
+                .map_err(|e| MarkitdownError::Zip(format!("Failed to read ZIP entry name: {}", e)))?
+                .into_owned();
             if name.starts_with("ppt/slides/slide") && name.ends_with(".xml") {
                 slide_files.push(name);
             }

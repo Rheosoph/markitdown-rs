@@ -93,7 +93,10 @@ impl ZipConverter {
                 continue;
             }
 
-            let path = file.name().to_string();
+            let path = file
+                .name()
+                .map_err(|e| MarkitdownError::ParseError(format!("ZIP entry name error: {}", e)))?
+                .into_owned();
             let mut contents = Vec::new();
 
             if file.read_to_end(&mut contents).is_ok() {

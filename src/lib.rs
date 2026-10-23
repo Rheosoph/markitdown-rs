@@ -516,7 +516,7 @@ impl MarkItDown {
 
         for i in 0..archive.len() {
             let mut file = archive.by_index(i)?;
-            let file_name = file.name().to_string();
+            let file_name = file.name()?.into_owned();
 
             // Skip directories
             if file.is_dir() {
