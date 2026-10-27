@@ -41,7 +41,7 @@ infer = "0.19"
 image = { version = "0.25", default-features = false, features = ["bmp", "tiff", "png", "jpeg", "gif", "webp"] }
 mime_guess = "2.0.5"
 docx-rust = "0.1.10"
-liteparse = { git = "https://github.com/Rheosoph/liteparse-hayro", branch = "main", default-features = false }
+liteparse = { git = "https://github.com/Rheosoph/liteparse-hayro", rev = "02640b4b1c6ae5920ef8691f942e88eeb3a84ec0", default-features = false }
 regex = "1"
 serde = { version = "1", features = ["derive", "rc"] }
 quick-xml = "^0.39.2"
@@ -64,7 +64,7 @@ url = "2.5"
 thiserror = "2.0"
 hayro = {version="0.8.0", features = ["embed-fonts"]}
 hayro-syntax = "0.8.0"
-rtf-parser = "0.4.2"
+rtf-parser = { version = "0.4.3", default-features = false }
 rbook = {git = "https://github.com/Rheosoph/rbook.git", branch = "master"}
 mail-parser = "0.11.2"
 serde_yaml = "0.9.33"
