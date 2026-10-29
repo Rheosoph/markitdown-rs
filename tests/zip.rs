@@ -75,3 +75,41 @@ async fn test_zip_bytes_conversion() {
         .await;
     assert!(result.is_ok());
 }
+
+#[tokio::test]
+async fn conflicting_zip_header_names_are_rejected_by_converters() {
+    use markitdown::model::DocumentConverter;
+    let mut cloaked = build_test_zip_bytes();
+    assert_eq!(&cloaked[30..40], b"sample.txt");
+    cloaked[30] = b'x';
+    let converters: Vec<Box<dyn DocumentConverter>> = vec![
+        Box::new(markitdown::archive::ZipConverter),
+        Box::new(markitdown::docx::DocxConverter),
+        Box::new(markitdown::excel::ExcelConverter),
+        Box::new(markitdown::epub::EpubConverter),
+        Box::new(markitdown::opendocument::OdtConverter),
+        Box::new(markitdown::opendocument::OdsConverter),
+        Box::new(markitdown::opendocument::OdpConverter),
+        Box::new(markitdown::legacy_office::XlsConverter),
+        Box::new(markitdown::iwork::PagesConverter),
+        Box::new(markitdown::pptx::PptxConverter),
+    ];
+    for converter in converters {
+        let error = converter
+            .convert_bytes(Bytes::from(cloaked.clone()), None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("filename mismatch"), "{error}");
+    }
+    let error = MarkItDown::new()
+        .convert_bytes(
+            Bytes::from(cloaked),
+            Some(ConversionOptions {
+                file_extension: Some(".zip".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("filename mismatch"), "{error}");
+}

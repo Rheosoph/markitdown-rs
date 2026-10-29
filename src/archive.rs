@@ -78,7 +78,7 @@ pub struct ZipConverter;
 impl ZipConverter {
     fn extract_zip(bytes: &[u8]) -> Result<ArchiveExtractionResult, MarkitdownError> {
         let cursor = Cursor::new(bytes);
-        let mut archive = zip::ZipArchive::new(cursor)
+        let mut archive = crate::open_zip(cursor)
             .map_err(|e| MarkitdownError::ParseError(format!("ZIP parse error: {}", e)))?;
 
         let mut result = ArchiveExtractionResult::new();

@@ -79,13 +79,20 @@ use rst::RstConverter;
 use rtf::RtfConverter;
 use sqlite::SqliteConverter;
 use std::io::Cursor;
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::path::Path;
 use std::sync::Arc;
 use std::{collections::HashMap, fs};
 use typst::TypstConverter;
 use vcard::VCardConverter;
 use zip::ZipArchive;
+
+/// Reject conflicting ZIP headers before choosing document parts or entry names.
+pub(crate) fn open_zip<R: Read + Seek>(reader: R) -> Result<ZipArchive<R>, MarkitdownError> {
+    let mut archive = ZipArchive::new(reader)?;
+    archive.validate_header_consistency()?;
+    Ok(archive)
+}
 
 // Re-export key types
 pub use llm::{
@@ -509,7 +516,7 @@ impl MarkItDown {
         options: Option<ConversionOptions>,
     ) -> Result<Document, MarkitdownError> {
         let cursor = Cursor::new(bytes);
-        let mut archive = ZipArchive::new(cursor)?;
+        let mut archive = crate::open_zip(cursor)?;
 
         let mut document = Document::new();
         document.title = Some("ZIP Archive Contents".to_string());

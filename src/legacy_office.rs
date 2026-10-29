@@ -683,6 +683,10 @@ impl XlsConverter {
         // Use calamine which already supports .xls
         use calamine::{open_workbook_auto_from_rs, Reader};
 
+        // The auto reader also accepts ZIP-based workbooks despite the .xls extension.
+        if let Ok(mut archive) = zip::ZipArchive::new(Cursor::new(bytes)) {
+            archive.validate_header_consistency()?;
+        }
         let cursor = Cursor::new(bytes.to_vec());
         let mut workbook = open_workbook_auto_from_rs(cursor)
             .map_err(|e| MarkitdownError::ParseError(format!("XLS parse error: {}", e)))?;

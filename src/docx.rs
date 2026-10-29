@@ -7,7 +7,6 @@ use docx_rust::{
 use object_store::{ObjectStore, ObjectStoreExt};
 use std::io::{Cursor, Read};
 use std::sync::Arc;
-use zip::ZipArchive;
 
 use crate::error::MarkitdownError;
 use crate::model::{
@@ -107,7 +106,7 @@ impl DocxConverter {
     ) -> Result<Vec<ExtractedImage>, MarkitdownError> {
         let mut images = Vec::new();
         let cursor = Cursor::new(bytes);
-        let mut archive = ZipArchive::new(cursor)?;
+        let mut archive = crate::open_zip(cursor)?;
 
         for i in 0..archive.len() {
             let mut file = archive.by_index(i)?;

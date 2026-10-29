@@ -389,7 +389,7 @@ impl PptxConverter {
 
         // Extract images from media folder
         let cursor = Cursor::new(bytes);
-        let mut archive = ZipArchive::new(cursor)?;
+        let mut archive = crate::open_zip(cursor)?;
         let images = if extract_images {
             Self::extract_images(&mut archive)
         } else {
@@ -414,7 +414,7 @@ impl PptxConverter {
     /// Collect and sort slide file names from the archive
     fn collect_slide_files(bytes: &[u8]) -> Result<Vec<String>, MarkitdownError> {
         let cursor = Cursor::new(bytes);
-        let mut archive = ZipArchive::new(cursor)?;
+        let mut archive = crate::open_zip(cursor)?;
         let mut slide_files: Vec<String> = Vec::new();
 
         for i in 0..archive.len() {
@@ -441,7 +441,7 @@ impl PptxConverter {
         images: &HashMap<String, Vec<u8>>,
     ) -> Result<Page, MarkitdownError> {
         let cursor = Cursor::new(bytes);
-        let mut archive = ZipArchive::new(cursor)?;
+        let mut archive = crate::open_zip(cursor)?;
 
         // Read slide content
         let mut file = archive
@@ -455,7 +455,7 @@ impl PptxConverter {
 
         // Get relationships for this slide to map image references
         let cursor2 = Cursor::new(bytes);
-        let mut archive2 = ZipArchive::new(cursor2)?;
+        let mut archive2 = crate::open_zip(cursor2)?;
         let relationships = Self::parse_slide_relationships(&mut archive2, slide_num);
 
         let mut page = Page::new(slide_num);

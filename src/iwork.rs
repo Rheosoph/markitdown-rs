@@ -8,7 +8,6 @@ use bytes::Bytes;
 use object_store::{ObjectStore, ObjectStoreExt};
 use std::io::{Cursor, Read};
 use std::sync::Arc;
-use zip::ZipArchive;
 
 use crate::error::MarkitdownError;
 use crate::model::{ContentBlock, ConversionOptions, Document, DocumentConverter, Page};
@@ -19,7 +18,7 @@ pub struct PagesConverter;
 impl PagesConverter {
     fn convert_iwork(bytes: &[u8], format_name: &str) -> Result<Document, MarkitdownError> {
         let cursor = Cursor::new(bytes);
-        let mut archive = ZipArchive::new(cursor).map_err(|e| {
+        let mut archive = crate::open_zip(cursor).map_err(|e| {
             MarkitdownError::ParseError(format!("{} parse error: {}", format_name, e))
         })?;
 

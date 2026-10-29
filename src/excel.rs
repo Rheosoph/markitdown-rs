@@ -12,6 +12,7 @@ pub struct ExcelConverter;
 
 impl ExcelConverter {
     fn convert_excel_bytes(&self, bytes: &[u8]) -> Result<Document, MarkitdownError> {
+        crate::open_zip(Cursor::new(bytes))?;
         let reader = Cursor::new(bytes);
         let mut workbook: Xlsx<_> = Xlsx::new(reader).map_err(|e| {
             MarkitdownError::ParseError(format!("Failed to open Excel file: {}", e))

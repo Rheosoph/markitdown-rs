@@ -9,7 +9,6 @@ use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use std::io::{Cursor, Read};
 use std::sync::Arc;
-use zip::ZipArchive;
 
 use crate::error::MarkitdownError;
 use crate::model::{ContentBlock, ConversionOptions, Document, DocumentConverter, Page};
@@ -20,7 +19,7 @@ pub struct OdtConverter;
 impl OdtConverter {
     fn convert_odt(bytes: &[u8]) -> Result<Document, MarkitdownError> {
         let cursor = Cursor::new(bytes);
-        let mut archive = ZipArchive::new(cursor)
+        let mut archive = crate::open_zip(cursor)
             .map_err(|e| MarkitdownError::ParseError(format!("ODT parse error: {}", e)))?;
 
         let mut document = Document::new();
@@ -157,6 +156,7 @@ impl OdsConverter {
         // Use calamine which already supports .ods
         use calamine::{open_workbook_auto_from_rs, Reader};
 
+        crate::open_zip(Cursor::new(bytes))?;
         let cursor = Cursor::new(bytes.to_vec());
         let mut workbook = open_workbook_auto_from_rs(cursor)
             .map_err(|e| MarkitdownError::ParseError(format!("ODS parse error: {}", e)))?;
@@ -268,7 +268,7 @@ pub struct OdpConverter;
 impl OdpConverter {
     fn convert_odp(bytes: &[u8]) -> Result<Document, MarkitdownError> {
         let cursor = Cursor::new(bytes);
-        let mut archive = ZipArchive::new(cursor)
+        let mut archive = crate::open_zip(cursor)
             .map_err(|e| MarkitdownError::ParseError(format!("ODP parse error: {}", e)))?;
 
         let mut document = Document::new();
