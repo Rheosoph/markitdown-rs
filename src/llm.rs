@@ -461,7 +461,11 @@ impl<M: CompletionModel> LlmWrapper<M> {
         )))
     }
 
-    /// Describe a single ExtractedImage with context-aware prompts
+    /// Describe a single ExtractedImage with context-aware prompts.
+    ///
+    /// An image the provider refuses is sent once more re-encoded. If that is refused too, or
+    /// the image cannot be sent at all, the description is a skip note instead of an error, so
+    /// one bad image does not fail the document.
     async fn describe_single_extracted_image(
         &self,
         img: &ExtractedImage,
@@ -469,54 +473,27 @@ impl<M: CompletionModel> LlmWrapper<M> {
     where
         M: Send + Sync + 'static,
     {
-        // Prepare the image, converting if necessary
-        let (base64_data, image_type) = match prepare_image_for_llm(&img.data, &img.mime_type) {
-            PreparedImage::Ready(media_type) => (img.to_base64(), media_type),
-            PreparedImage::Converted(png_data) => {
-                (BASE64_STANDARD.encode(&png_data), ImageMediaType::PNG)
+        let prompt = single_image_prompt(img);
+
+        for encoding in [ImageEncoding::Original, ImageEncoding::Normalized] {
+            let image = match image_content(&img.data, &img.mime_type, ImageDetail::Auto, encoding)
+            {
+                Ok(image) => image,
+                Err(reason) => return Ok(skipped_image(&reason)),
+            };
+            let mut content = OneOrMany::one(image);
+            content.push(UserContent::text(prompt.clone()));
+            let request = self
+                .build_request(&self.config.image_description_prompt, content)
+                .build();
+
+            match self.send_request(request).await {
+                Err(error) if is_image_rejection(&error) => continue,
+                result => return result,
             }
-            PreparedImage::Unsupported(reason) => {
-                return Ok(format!("[Image skipped: {}]", reason));
-            }
-        };
-
-        let mut content = OneOrMany::one(UserContent::image_base64(
-            base64_data,
-            Some(image_type),
-            Some(ImageDetail::Auto),
-        ));
-
-        // Build a context-aware prompt
-        let mut prompt = String::from("Describe this image in detail.");
-        if let Some(alt) = &img.alt_text {
-            prompt.push_str(&format!(
-                " The existing alt text is: '{}'. Build upon or improve this description.",
-                alt
-            ));
-        }
-        if let (Some(w), Some(h)) = (img.width, img.height) {
-            prompt.push_str(&format!(" The image is {}x{} pixels.", w, h));
-        }
-        if let Some(page) = img.page_number {
-            prompt.push_str(&format!(
-                " This image appears on page {} of the document.",
-                page
-            ));
-        }
-        if let Some(path) = &img.source_path {
-            prompt.push_str(&format!(
-                " The source path is: '{}'. Use this as a contextual hint if relevant.",
-                path
-            ));
         }
 
-        content.push(UserContent::text(prompt));
-
-        let request = self
-            .build_request(&self.config.image_description_prompt, content)
-            .build();
-
-        self.send_request(request).await
+        Ok(skipped_image(UNREADABLE_IMAGE))
     }
 
     async fn describe_extracted_images_individual(
@@ -552,72 +529,85 @@ impl<M: CompletionModel> LlmWrapper<M> {
                 continue;
             }
 
-            let mut content = OneOrMany::one(UserContent::text(&self.config.batch_image_prompt));
-            let mut processed_count = 0;
-            let mut skipped_descriptions = Vec::new();
-
-            for (i, img) in chunk.iter().enumerate() {
-                // Prepare the image, converting if necessary
-                let (base64_data, image_type) =
-                    match prepare_image_for_llm(&img.data, &img.mime_type) {
-                        PreparedImage::Ready(media_type) => (img.to_base64(), media_type),
-                        PreparedImage::Converted(png_data) => {
-                            (BASE64_STANDARD.encode(&png_data), ImageMediaType::PNG)
-                        }
-                        PreparedImage::Unsupported(reason) => {
-                            skipped_descriptions.push((i, format!("[Image skipped: {}]", reason)));
-                            continue;
-                        }
-                    };
-
-                processed_count += 1;
-                let mut context = format!("\n--- Image {} ---", processed_count);
-                if let Some(alt) = &img.alt_text {
-                    context.push_str(&format!("\nExisting alt text: {}", alt));
+            // A refused image would fail the whole batch; described one by one, it is the
+            // only one that gets a skip note
+            match self.describe_extracted_image_batch(chunk).await {
+                Err(error) if is_image_rejection(&error) => {
+                    all_descriptions.extend(self.describe_extracted_images_individual(chunk).await?)
                 }
-                if let (Some(w), Some(h)) = (img.width, img.height) {
-                    context.push_str(&format!("\nDimensions: {}x{} pixels", w, h));
-                }
-                if let Some(page) = img.page_number {
-                    context.push_str(&format!("\nFrom page: {}", page));
-                }
-                if let Some(path) = &img.source_path {
-                    context.push_str(&format!("\nSource path hint: {}", path));
-                }
-
-                content.push(UserContent::text(context));
-                content.push(UserContent::image_base64(
-                    base64_data,
-                    Some(image_type),
-                    Some(ImageDetail::Auto),
-                ));
+                result => all_descriptions.extend(result?),
             }
-
-            // If all images were skipped, just add the placeholders
-            if processed_count == 0 {
-                for (_, desc) in skipped_descriptions {
-                    all_descriptions.push(desc);
-                }
-                continue;
-            }
-
-            let request = self
-                .build_request(&self.config.batch_image_prompt, content)
-                .build();
-
-            let response = self.send_request(request).await?;
-            let mut descriptions = parse_batch_response(&response, processed_count);
-
-            // Insert skipped placeholders at their original positions
-            for (original_idx, placeholder) in skipped_descriptions {
-                let insert_pos = original_idx.min(descriptions.len());
-                descriptions.insert(insert_pos, placeholder);
-            }
-
-            all_descriptions.extend(descriptions);
         }
 
         Ok(all_descriptions)
+    }
+
+    /// Describe several images in one request
+    async fn describe_extracted_image_batch(
+        &self,
+        chunk: &[&ExtractedImage],
+    ) -> Result<Vec<String>, MarkitdownError>
+    where
+        M: Send + Sync + 'static,
+    {
+        let mut content = OneOrMany::one(UserContent::text(&self.config.batch_image_prompt));
+        let mut processed_count = 0;
+        let mut skipped_descriptions = Vec::new();
+
+        for (i, img) in chunk.iter().enumerate() {
+            let image = match image_content(
+                &img.data,
+                &img.mime_type,
+                ImageDetail::Auto,
+                ImageEncoding::Original,
+            ) {
+                Ok(image) => image,
+                Err(reason) => {
+                    skipped_descriptions.push((i, skipped_image(&reason)));
+                    continue;
+                }
+            };
+
+            processed_count += 1;
+            let mut context = format!("\n--- Image {} ---", processed_count);
+            if let Some(alt) = &img.alt_text {
+                context.push_str(&format!("\nExisting alt text: {}", alt));
+            }
+            if let (Some(w), Some(h)) = (img.width, img.height) {
+                context.push_str(&format!("\nDimensions: {}x{} pixels", w, h));
+            }
+            if let Some(page) = img.page_number {
+                context.push_str(&format!("\nFrom page: {}", page));
+            }
+            if let Some(path) = &img.source_path {
+                context.push_str(&format!("\nSource path hint: {}", path));
+            }
+
+            content.push(UserContent::text(context));
+            content.push(image);
+        }
+
+        if processed_count == 0 {
+            return Ok(skipped_descriptions
+                .into_iter()
+                .map(|(_, placeholder)| placeholder)
+                .collect());
+        }
+
+        let request = self
+            .build_request(&self.config.batch_image_prompt, content)
+            .build();
+
+        let response = self.send_request(request).await?;
+        let mut descriptions = parse_batch_response(&response, processed_count);
+
+        // Insert skipped placeholders at their original positions
+        for (original_idx, placeholder) in skipped_descriptions {
+            let insert_pos = original_idx.min(descriptions.len());
+            descriptions.insert(insert_pos, placeholder);
+        }
+
+        Ok(descriptions)
     }
 }
 
@@ -874,19 +864,22 @@ fn is_legacy_metafile(mime_type: &str) -> bool {
     )
 }
 
-/// Convert an image from a legacy format (BMP, TIFF) to PNG bytes.
-/// Returns None if conversion fails or format is not supported.
-fn convert_to_png(image_data: &[u8], mime_type: &str) -> Option<Vec<u8>> {
-    let format = match mime_type.to_lowercase().as_str() {
-        "image/bmp" | "image/x-ms-bmp" => ImageFormat::Bmp,
-        "image/tiff" | "image/x-tiff" => ImageFormat::Tiff,
-        _ => return None,
-    };
+/// Media type providers accept for an image format, as detected from the image bytes
+fn sendable_media_type(format: ImageFormat) -> Option<ImageMediaType> {
+    match format {
+        ImageFormat::Png => Some(ImageMediaType::PNG),
+        ImageFormat::Jpeg => Some(ImageMediaType::JPEG),
+        ImageFormat::Gif => Some(ImageMediaType::GIF),
+        ImageFormat::WebP => Some(ImageMediaType::WEBP),
+        _ => None,
+    }
+}
 
-    // Try to load the image
+/// Convert an image in a format providers do not accept (BMP, TIFF) to PNG bytes.
+/// Returns None if the image cannot be decoded.
+fn convert_to_png(image_data: &[u8], format: ImageFormat) -> Option<Vec<u8>> {
     let img = image::load_from_memory_with_format(image_data, format).ok()?;
 
-    // Convert to PNG
     let mut png_bytes = Vec::new();
     let mut cursor = Cursor::new(&mut png_bytes);
     img.write_to(&mut cursor, ImageFormat::Png).ok()?;
@@ -894,24 +887,56 @@ fn convert_to_png(image_data: &[u8], mime_type: &str) -> Option<Vec<u8>> {
     Some(png_bytes)
 }
 
+/// Longest edge of a re-encoded image. Providers downscale larger images anyway (Anthropic to
+/// 1568 px, OpenAI to 2048 px), and the smaller file stays under per-image size limits.
+const NORMALIZED_MAX_EDGE: u32 = 2048;
+const NORMALIZED_JPEG_QUALITY: u8 = 90;
+
+/// Decode an image and re-encode it as a plain 8-bit image no larger than
+/// [`NORMALIZED_MAX_EDGE`]: PNG when it has transparency, JPEG otherwise. Providers read these
+/// even when they refuse the original encoding (CMYK JPEGs, 16-bit PNGs, oversized files).
+fn normalize_image(image_data: &[u8]) -> Option<(Vec<u8>, ImageMediaType)> {
+    let image = image::load_from_memory(image_data).ok()?;
+    let image = if image.width().max(image.height()) > NORMALIZED_MAX_EDGE {
+        image.resize(
+            NORMALIZED_MAX_EDGE,
+            NORMALIZED_MAX_EDGE,
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        image
+    };
+
+    let mut out = Cursor::new(Vec::new());
+    if image.color().has_alpha() {
+        image::DynamicImage::ImageRgba8(image.to_rgba8())
+            .write_to(&mut out, ImageFormat::Png)
+            .ok()?;
+        Some((out.into_inner(), ImageMediaType::PNG))
+    } else {
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, NORMALIZED_JPEG_QUALITY)
+            .encode_image(&image::DynamicImage::ImageRgb8(image.to_rgb8()))
+            .ok()?;
+        Some((out.into_inner(), ImageMediaType::JPEG))
+    }
+}
+
 /// Result of attempting to prepare an image for LLM API.
 enum PreparedImage {
-    /// Image is ready to use with the given type
+    /// The original bytes can be sent with the given type
     Ready(ImageMediaType),
-    /// Image was converted to PNG, new data provided
-    Converted(Vec<u8>),
-    /// Image format is unsupported and cannot be converted
+    /// Re-encoded bytes to send instead of the original
+    Converted(Vec<u8>, ImageMediaType),
+    /// The image cannot be sent, for the given reason
     Unsupported(String),
 }
 
 /// Prepare image data for LLM API, converting if necessary.
+///
+/// The format is read from the bytes: a declared MIME type comes from a file name or a
+/// container entry and is often wrong, and a provider refuses an image whose data does not
+/// match the media type it was sent with.
 fn prepare_image_for_llm(image_data: &[u8], mime_type: &str) -> PreparedImage {
-    // First, check if it's already a supported format
-    if let Some(media_type) = parse_mime_to_image_type(mime_type) {
-        return PreparedImage::Ready(media_type);
-    }
-
-    // Check if it's a legacy metafile format (EMF/WMF) - these cannot be converted
     if is_legacy_metafile(mime_type) {
         return PreparedImage::Unsupported(format!(
             "Windows Metafile format ({}) cannot be converted - these are vector graphics formats with no pure Rust support",
@@ -919,20 +944,180 @@ fn prepare_image_for_llm(image_data: &[u8], mime_type: &str) -> PreparedImage {
         ));
     }
 
-    // Try to convert convertible formats (BMP, TIFF)
-    if is_convertible_format(mime_type) {
-        if let Some(png_data) = convert_to_png(image_data, mime_type) {
-            return PreparedImage::Converted(png_data);
-        } else {
-            return PreparedImage::Unsupported(format!(
-                "Failed to convert {} image to PNG",
-                mime_type
-            ));
-        }
+    let Ok(format) = image::guess_format(image_data) else {
+        return PreparedImage::Unsupported(format!(
+            "Unsupported image format: {} (the data is not a recognized image)",
+            mime_type
+        ));
+    };
+
+    if let Some(media_type) = sendable_media_type(format) {
+        return PreparedImage::Ready(media_type);
     }
 
-    // Unknown format
-    PreparedImage::Unsupported(format!("Unsupported image format: {}", mime_type))
+    match convert_to_png(image_data, format) {
+        Some(png_data) => PreparedImage::Converted(png_data, ImageMediaType::PNG),
+        None => PreparedImage::Unsupported(format!(
+            "Failed to convert {} image to PNG",
+            format.to_mime_type()
+        )),
+    }
+}
+
+/// Note for an image the provider refused in every encoding
+const UNREADABLE_IMAGE: &str = "the model could not read this image";
+
+/// How images are put into a request. When the provider refuses an image, the request is
+/// sent again with the next encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageEncoding {
+    /// The original bytes in a format providers accept, other formats converted to PNG
+    Original,
+    /// Decoded and re-encoded with [`normalize_image`]
+    Normalized,
+    /// Left out, with a text note in its place
+    Omitted,
+}
+
+fn prepare_image(image_data: &[u8], mime_type: &str, encoding: ImageEncoding) -> PreparedImage {
+    if encoding == ImageEncoding::Omitted {
+        return PreparedImage::Unsupported(UNREADABLE_IMAGE.to_string());
+    }
+
+    match prepare_image_for_llm(image_data, mime_type) {
+        PreparedImage::Ready(_) if encoding == ImageEncoding::Normalized => {
+            match normalize_image(image_data) {
+                Some((data, media_type)) => PreparedImage::Converted(data, media_type),
+                None => PreparedImage::Unsupported(
+                    "the image data is damaged and could not be decoded".to_string(),
+                ),
+            }
+        }
+        prepared => prepared,
+    }
+}
+
+/// The request content for an image, or the reason it cannot be sent
+fn image_content(
+    image_data: &[u8],
+    mime_type: &str,
+    detail: ImageDetail,
+    encoding: ImageEncoding,
+) -> Result<UserContent, String> {
+    let (data, media_type) = match prepare_image(image_data, mime_type, encoding) {
+        PreparedImage::Ready(media_type) => (BASE64_STANDARD.encode(image_data), media_type),
+        PreparedImage::Converted(data, media_type) => (BASE64_STANDARD.encode(&data), media_type),
+        PreparedImage::Unsupported(reason) => return Err(reason),
+    };
+    Ok(UserContent::image_base64(
+        data,
+        Some(media_type),
+        Some(detail),
+    ))
+}
+
+fn skipped_image(reason: &str) -> String {
+    format!("[Image skipped: {}]", reason)
+}
+
+/// Whether the provider refused an image in the request, such as "the image could not be
+/// read", "Could not process image", "image exceeds 5 MB maximum" or "Invalid image".
+/// Rate limits and quota errors are never treated as a refused image.
+fn is_image_rejection(error: &MarkitdownError) -> bool {
+    let message = error.to_string().to_lowercase();
+    let transient = ["429", "rate limit", "quota", "overloaded"]
+        .iter()
+        .any(|marker| message.contains(marker));
+    let client_error = [
+        "400",
+        "413",
+        "422",
+        "bad request",
+        "invalid_request",
+        "invalid_argument",
+        "validationexception",
+    ]
+    .iter()
+    .any(|marker| message.contains(marker));
+
+    !transient && client_error && message.contains("image")
+}
+
+/// User content for a multimodal prompt. Adjacent text parts, and notes for images that are
+/// not sent, are merged so the provider receives fewer, larger text blocks.
+fn multimodal_content(
+    parts: &[PromptPart],
+    encoding: ImageEncoding,
+) -> Result<OneOrMany<UserContent>, MarkitdownError> {
+    fn push_line(text: &mut String, line: &str) {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(line);
+    }
+
+    let mut contents: Vec<UserContent> = Vec::with_capacity(parts.len());
+    let mut pending_text = String::new();
+
+    for part in parts {
+        match part {
+            PromptPart::Text(text) => push_line(&mut pending_text, text),
+            PromptPart::Image {
+                data,
+                mime_type,
+                high_detail,
+            } => {
+                let detail = if *high_detail {
+                    ImageDetail::High
+                } else {
+                    ImageDetail::Auto
+                };
+                match image_content(data, mime_type, detail, encoding) {
+                    Ok(image) => {
+                        if !pending_text.is_empty() {
+                            contents.push(UserContent::text(std::mem::take(&mut pending_text)));
+                        }
+                        contents.push(image);
+                    }
+                    Err(reason) => push_line(&mut pending_text, &skipped_image(&reason)),
+                }
+            }
+        }
+    }
+    if !pending_text.is_empty() {
+        contents.push(UserContent::text(pending_text));
+    }
+
+    OneOrMany::many(contents).map_err(|_| {
+        MarkitdownError::LlmError("Multimodal prompt must contain at least one part".into())
+    })
+}
+
+/// Prompt for describing one image, with what is known about it as context
+fn single_image_prompt(img: &ExtractedImage) -> String {
+    let mut prompt = String::from("Describe this image in detail.");
+    if let Some(alt) = &img.alt_text {
+        prompt.push_str(&format!(
+            " The existing alt text is: '{}'. Build upon or improve this description.",
+            alt
+        ));
+    }
+    if let (Some(w), Some(h)) = (img.width, img.height) {
+        prompt.push_str(&format!(" The image is {}x{} pixels.", w, h));
+    }
+    if let Some(page) = img.page_number {
+        prompt.push_str(&format!(
+            " This image appears on page {} of the document.",
+            page
+        ));
+    }
+    if let Some(path) = &img.source_path {
+        prompt.push_str(&format!(
+            " The source path is: '{}'. Use this as a contextual hint if relevant.",
+            path
+        ));
+    }
+    prompt
 }
 
 #[async_trait]
@@ -942,29 +1127,8 @@ impl<M: CompletionModel + Send + Sync + 'static> LlmClient for LlmWrapper<M> {
         image_data: &[u8],
         mime_type: &str,
     ) -> Result<String, MarkitdownError> {
-        // Prepare the image, converting if necessary
-        let (base64_data, image_type) = match prepare_image_for_llm(image_data, mime_type) {
-            PreparedImage::Ready(media_type) => (BASE64_STANDARD.encode(image_data), media_type),
-            PreparedImage::Converted(png_data) => {
-                (BASE64_STANDARD.encode(&png_data), ImageMediaType::PNG)
-            }
-            PreparedImage::Unsupported(reason) => {
-                return Ok(format!("[Image skipped: {}]", reason));
-            }
-        };
-
-        let mut content = OneOrMany::one(UserContent::image_base64(
-            base64_data,
-            Some(image_type),
-            Some(ImageDetail::Auto),
-        ));
-        content.push(UserContent::text("Describe this image in detail."));
-
-        let request = self
-            .build_request(&self.config.image_description_prompt, content)
-            .build();
-
-        self.send_request(request).await
+        let image = ExtractedImage::new("image", Bytes::copy_from_slice(image_data), mime_type);
+        self.describe_single_extracted_image(&image).await
     }
 
     async fn describe_image_base64(
@@ -972,149 +1136,29 @@ impl<M: CompletionModel + Send + Sync + 'static> LlmClient for LlmWrapper<M> {
         base64_data: &str,
         mime_type: &str,
     ) -> Result<String, MarkitdownError> {
-        // Note: For base64 input, we cannot convert - caller must provide supported format
-        let image_type = match parse_mime_to_image_type(mime_type) {
-            Some(t) => t,
-            None => {
-                // Try to decode and convert if it's a convertible format
-                if is_convertible_format(mime_type) {
-                    if let Ok(decoded) = BASE64_STANDARD.decode(base64_data) {
-                        if let Some(png_data) = convert_to_png(&decoded, mime_type) {
-                            let png_base64 = BASE64_STANDARD.encode(&png_data);
-                            let mut content = OneOrMany::one(UserContent::image_base64(
-                                png_base64,
-                                Some(ImageMediaType::PNG),
-                                Some(ImageDetail::Auto),
-                            ));
-                            content.push(UserContent::text("Describe this image in detail."));
-
-                            let request = self
-                                .build_request(&self.config.image_description_prompt, content)
-                                .build();
-
-                            return self.send_request(request).await;
-                        }
-                    }
-                }
-
-                if is_legacy_metafile(mime_type) {
-                    return Ok(format!(
-                        "[Image skipped: Windows Metafile format ({}) cannot be converted]",
-                        mime_type
-                    ));
-                }
-
-                return Ok(format!("[Image skipped: Unsupported format {}]", mime_type));
-            }
-        };
-
-        let mut content = OneOrMany::one(UserContent::image_base64(
-            base64_data.to_string(),
-            Some(image_type),
-            Some(ImageDetail::Auto),
-        ));
-        content.push(UserContent::text("Describe this image in detail."));
-
-        let request = self
-            .build_request(&self.config.image_description_prompt, content)
-            .build();
-
-        self.send_request(request).await
+        match BASE64_STANDARD.decode(base64_data) {
+            Ok(image_data) => self.describe_image(&image_data, mime_type).await,
+            Err(_) => Ok(skipped_image("the image data is not valid base64")),
+        }
     }
 
     async fn describe_images_batch(
         &self,
         images: &[(&[u8], &str)],
     ) -> Result<Vec<String>, MarkitdownError> {
-        if images.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let batch_size = self.config.images_per_message;
-
-        if batch_size == 1 {
-            // Process one at a time in parallel
-            let futures: Vec<_> = images
-                .iter()
-                .map(|(data, mime)| self.describe_image(data, mime))
-                .collect();
-
-            let results = join_all(futures).await;
-            results.into_iter().collect()
-        } else {
-            // Process in batches
-            let mut all_descriptions = Vec::with_capacity(images.len());
-
-            for chunk in images.chunks(batch_size) {
-                if chunk.len() == 1 {
-                    // Single image, use regular method
-                    let desc = self.describe_image(chunk[0].0, chunk[0].1).await?;
-                    all_descriptions.push(desc);
-                } else {
-                    // Multiple images in one request
-                    let mut content =
-                        OneOrMany::one(UserContent::text(&self.config.batch_image_prompt));
-
-                    let mut skipped_descriptions = Vec::new();
-                    let mut processed_count = 0;
-
-                    for (i, (data, mime)) in chunk.iter().enumerate() {
-                        // Prepare the image, converting if necessary
-                        let (base64_data, image_type) = match prepare_image_for_llm(data, mime) {
-                            PreparedImage::Ready(media_type) => {
-                                (BASE64_STANDARD.encode(data), media_type)
-                            }
-                            PreparedImage::Converted(png_data) => {
-                                (BASE64_STANDARD.encode(&png_data), ImageMediaType::PNG)
-                            }
-                            PreparedImage::Unsupported(reason) => {
-                                skipped_descriptions
-                                    .push((i, format!("[Image skipped: {}]", reason)));
-                                continue;
-                            }
-                        };
-
-                        processed_count += 1;
-                        content.push(UserContent::text(format!(
-                            "\n--- Image {} ---",
-                            processed_count
-                        )));
-                        content.push(UserContent::image_base64(
-                            base64_data,
-                            Some(image_type),
-                            Some(ImageDetail::Auto),
-                        ));
-                    }
-
-                    // If all images in this chunk were skipped, add placeholders and continue
-                    if processed_count == 0 {
-                        for (_, desc) in skipped_descriptions {
-                            all_descriptions.push(desc);
-                        }
-                        continue;
-                    }
-
-                    let request = self
-                        .build_request(&self.config.batch_image_prompt, content)
-                        .build();
-
-                    let response = self.send_request(request).await?;
-
-                    // Parse the response to extract individual descriptions
-                    let mut descriptions = parse_batch_response(&response, processed_count);
-
-                    // Insert skipped placeholders at their original positions
-                    for (original_idx, placeholder) in skipped_descriptions {
-                        let insert_pos = original_idx.min(descriptions.len());
-                        descriptions.insert(insert_pos, placeholder);
-                    }
-
-                    all_descriptions.extend(descriptions);
-                }
-            }
-
-            Ok(all_descriptions)
-        }
+        let images: Vec<ExtractedImage> = images
+            .iter()
+            .enumerate()
+            .map(|(i, (data, mime_type))| {
+                ExtractedImage::new(
+                    format!("image_{}", i + 1),
+                    Bytes::copy_from_slice(data),
+                    *mime_type,
+                )
+            })
+            .collect();
+        let image_refs: Vec<&ExtractedImage> = images.iter().collect();
+        self.describe_extracted_images(&image_refs).await
     }
 
     async fn convert_page_image(
@@ -1122,34 +1166,31 @@ impl<M: CompletionModel + Send + Sync + 'static> LlmClient for LlmWrapper<M> {
         image_data: &[u8],
         mime_type: &str,
     ) -> Result<String, MarkitdownError> {
-        // Prepare the image, converting if necessary
-        let (base64_data, image_type) = match prepare_image_for_llm(image_data, mime_type) {
-            PreparedImage::Ready(media_type) => (BASE64_STANDARD.encode(image_data), media_type),
-            PreparedImage::Converted(png_data) => {
-                (BASE64_STANDARD.encode(&png_data), ImageMediaType::PNG)
+        let mut rejection = None;
+        for encoding in [ImageEncoding::Original, ImageEncoding::Normalized] {
+            let image = match image_content(image_data, mime_type, ImageDetail::High, encoding) {
+                Ok(image) => image,
+                Err(reason) => {
+                    return Err(rejection.unwrap_or_else(|| {
+                        MarkitdownError::LlmError(format!("Cannot convert page image: {}", reason))
+                    }))
+                }
+            };
+            let mut content = OneOrMany::one(image);
+            content.push(UserContent::text(
+                "Convert this page to markdown. Output only the content, no commentary.",
+            ));
+            let request = self
+                .build_request(&self.config.page_conversion_prompt, content)
+                .build();
+
+            match self.send_request(request).await {
+                Err(error) if is_image_rejection(&error) => rejection = Some(error),
+                result => return result,
             }
-            PreparedImage::Unsupported(reason) => {
-                return Err(MarkitdownError::LlmError(format!(
-                    "Cannot convert page image: {}",
-                    reason
-                )));
-            }
-        };
+        }
 
-        let mut content = OneOrMany::one(UserContent::image_base64(
-            base64_data,
-            Some(image_type),
-            Some(ImageDetail::High), // Use high detail for page conversion
-        ));
-        content.push(UserContent::text(
-            "Convert this page to markdown. Output only the content, no commentary.",
-        ));
-
-        let request = self
-            .build_request(&self.config.page_conversion_prompt, content)
-            .build();
-
-        self.send_request(request).await
+        Err(rejection.unwrap_or_else(|| MarkitdownError::LlmError(UNREADABLE_IMAGE.into())))
     }
 
     async fn convert_page_images_batch(&self, pages: &[(&[u8], &str)]) -> Vec<Option<String>> {
@@ -1194,78 +1235,40 @@ impl<M: CompletionModel + Send + Sync + 'static> LlmClient for LlmWrapper<M> {
         parts: &[PromptPart],
         max_tokens: Option<u64>,
     ) -> Result<LlmResponse, MarkitdownError> {
-        let mut contents: Vec<UserContent> = Vec::with_capacity(parts.len());
-        // Adjacent text parts are merged so the provider receives fewer, larger text blocks
-        let mut pending_text = String::new();
+        let has_images = parts
+            .iter()
+            .any(|part| matches!(part, PromptPart::Image { .. }));
+        let encodings: &[ImageEncoding] = if has_images {
+            &[
+                ImageEncoding::Original,
+                ImageEncoding::Normalized,
+                ImageEncoding::Omitted,
+            ]
+        } else {
+            &[ImageEncoding::Original]
+        };
 
-        for part in parts {
-            let image = match part {
-                PromptPart::Text(text) => {
-                    if !pending_text.is_empty() {
-                        pending_text.push('\n');
-                    }
-                    pending_text.push_str(text);
-                    continue;
-                }
-                PromptPart::Image {
-                    data,
-                    mime_type,
-                    high_detail,
-                } => {
-                    let detail = if *high_detail {
-                        ImageDetail::High
-                    } else {
-                        ImageDetail::Auto
-                    };
-                    match prepare_image_for_llm(data, mime_type) {
-                        PreparedImage::Ready(media_type) => Ok(UserContent::image_base64(
-                            BASE64_STANDARD.encode(data),
-                            Some(media_type),
-                            Some(detail),
-                        )),
-                        PreparedImage::Converted(png_data) => Ok(UserContent::image_base64(
-                            BASE64_STANDARD.encode(&png_data),
-                            Some(ImageMediaType::PNG),
-                            Some(detail),
-                        )),
-                        PreparedImage::Unsupported(reason) => Err(reason),
-                    }
-                }
-            };
+        let mut rejection = None;
+        for &encoding in encodings {
+            let mut builder =
+                self.build_request(system_prompt, multimodal_content(parts, encoding)?);
+            if let Some(max_tokens) = max_tokens {
+                builder = builder.max_tokens(max_tokens);
+            }
 
-            match image {
-                Ok(content) => {
-                    if !pending_text.is_empty() {
-                        contents.push(UserContent::text(std::mem::take(&mut pending_text)));
-                    }
-                    contents.push(content);
-                }
-                Err(reason) => {
-                    if !pending_text.is_empty() {
-                        pending_text.push('\n');
-                    }
-                    pending_text.push_str(&format!("[Image skipped: {}]", reason));
+            match self.send_raw(builder.build()).await {
+                Err(error) if is_image_rejection(&error) => rejection = Some(error),
+                result => {
+                    let (choice, usage) = result?;
+                    return Ok(LlmResponse {
+                        text: detect_and_truncate_repetition(&extract_answer_text(&choice)),
+                        usage,
+                    });
                 }
             }
         }
-        if !pending_text.is_empty() {
-            contents.push(UserContent::text(pending_text));
-        }
 
-        let content = OneOrMany::many(contents).map_err(|_| {
-            MarkitdownError::LlmError("Multimodal prompt must contain at least one part".into())
-        })?;
-
-        let mut builder = self.build_request(system_prompt, content);
-        if let Some(max_tokens) = max_tokens {
-            builder = builder.max_tokens(max_tokens);
-        }
-
-        let (choice, usage) = self.send_raw(builder.build()).await?;
-        Ok(LlmResponse {
-            text: detect_and_truncate_repetition(&extract_answer_text(&choice)),
-            usage,
-        })
+        Err(rejection.unwrap_or_else(|| MarkitdownError::LlmError(UNREADABLE_IMAGE.into())))
     }
 
     fn config(&self) -> &LlmConfig {
@@ -1656,7 +1659,7 @@ mod tests {
         let parts = vec![
             PromptPart::text("<page number=\"1\">"),
             PromptPart::Image {
-                data: Bytes::from_static(b"png bytes"),
+                data: Bytes::from(photo(ImageFormat::Png)),
                 mime_type: "image/png".to_string(),
                 high_detail: true,
             },
@@ -1700,5 +1703,245 @@ mod tests {
             }
             other => panic!("expected merged text, got {:?}", other),
         }
+    }
+
+    /// Provider error for an embedded document image the model could not decode
+    const IMAGE_UNREADABLE: &str = "HttpError: Invalid status code 400 Bad Request with message: \
+        {\"error\": {\"type\": \"invalid_request_error\", \"message\": \"the image could not \
+        be read: cannot read the image fdd3aed3c33c164121722afedc3ce15c.img\"}}";
+
+    fn encoded_image(format: ImageFormat, image: image::DynamicImage) -> Vec<u8> {
+        let mut out = Cursor::new(Vec::new());
+        image.write_to(&mut out, format).unwrap();
+        out.into_inner()
+    }
+
+    fn photo(format: ImageFormat) -> Vec<u8> {
+        encoded_image(format, image::DynamicImage::new_rgb8(8, 8))
+    }
+
+    /// Media types of the images in each request
+    fn sent_image_types(model: &MockCompletionModel) -> Vec<Vec<Option<ImageMediaType>>> {
+        model
+            .requests()
+            .iter()
+            .map(|request| {
+                request
+                    .chat_history
+                    .iter()
+                    .flat_map(|message| match message {
+                        Message::User { content } => content
+                            .iter()
+                            .filter_map(|c| match c {
+                                UserContent::Image(image) => Some(image.media_type.clone()),
+                                _ => None,
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn sent_text(request: &CompletionRequest) -> String {
+        request
+            .chat_history
+            .iter()
+            .flat_map(|message| match message {
+                Message::User { content } => content
+                    .iter()
+                    .filter_map(|c| match c {
+                        UserContent::Text(text) => Some(text.text.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn image_type_is_read_from_the_bytes_not_the_declared_mime_type() {
+        assert!(matches!(
+            prepare_image_for_llm(&photo(ImageFormat::Jpeg), "image/png"),
+            PreparedImage::Ready(ImageMediaType::JPEG)
+        ));
+        assert!(matches!(
+            prepare_image_for_llm(&photo(ImageFormat::Bmp), "image/png"),
+            PreparedImage::Converted(_, ImageMediaType::PNG)
+        ));
+        match prepare_image_for_llm(b"not an image at all", "image/jpeg") {
+            PreparedImage::Unsupported(reason) => {
+                assert!(reason.contains("not a recognized image"), "{}", reason)
+            }
+            _ => panic!("expected bytes that are no image to be unsupported"),
+        }
+    }
+
+    #[test]
+    fn normalized_images_are_8_bit_and_bounded() {
+        let wide_16_bit = encoded_image(
+            ImageFormat::Png,
+            image::DynamicImage::new_rgb16(3_000, 1_000),
+        );
+        let (data, media_type) = normalize_image(&wide_16_bit).unwrap();
+        assert_eq!(media_type, ImageMediaType::JPEG);
+        let decoded = image::load_from_memory(&data).unwrap();
+        assert_eq!(decoded.width(), NORMALIZED_MAX_EDGE);
+        assert!(decoded.height() < NORMALIZED_MAX_EDGE);
+
+        let transparent = encoded_image(ImageFormat::Png, image::DynamicImage::new_rgba8(4, 4));
+        assert!(matches!(
+            normalize_image(&transparent),
+            Some((_, ImageMediaType::PNG))
+        ));
+    }
+
+    #[test]
+    fn image_rejections_are_told_apart_from_other_errors() {
+        let rejected =
+            |message: &str| is_image_rejection(&MarkitdownError::LlmError(message.to_string()));
+
+        assert!(rejected(IMAGE_UNREADABLE));
+        assert!(rejected(
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"Could not process image"}}"#
+        ));
+        assert!(rejected(
+            r#"{"error":{"code":400,"message":"Unable to process input image.","status":"INVALID_ARGUMENT"}}"#
+        ));
+        assert!(!rejected(
+            "429 Too Many Requests: rate limit reached for image inputs"
+        ));
+        assert!(!rejected(TEMPERATURE_REJECTED));
+        assert!(!rejected("Invalid status code 401 Unauthorized"));
+    }
+
+    #[tokio::test]
+    async fn refused_image_is_sent_again_re_encoded() {
+        let model = MockCompletionModel::new([
+            MockTurn::error(IMAGE_UNREADABLE),
+            MockTurn::text("A bar chart"),
+        ]);
+        let llm = LlmWrapper::new(model.clone());
+        let png_16_bit = encoded_image(ImageFormat::Png, image::DynamicImage::new_rgb16(8, 8));
+
+        let description = llm.describe_image(&png_16_bit, "image/png").await.unwrap();
+
+        assert_eq!(description, "A bar chart");
+        assert_eq!(
+            sent_image_types(&model),
+            vec![
+                vec![Some(ImageMediaType::PNG)],
+                vec![Some(ImageMediaType::JPEG)]
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn image_refused_in_every_encoding_is_skipped_instead_of_failing() {
+        let model = MockCompletionModel::new([
+            MockTurn::error(IMAGE_UNREADABLE),
+            MockTurn::error(IMAGE_UNREADABLE),
+        ]);
+        let llm = LlmWrapper::new(model.clone());
+
+        let description = llm
+            .describe_image(&photo(ImageFormat::Jpeg), "image/jpeg")
+            .await
+            .unwrap();
+
+        assert_eq!(description, skipped_image(UNREADABLE_IMAGE));
+        assert_eq!(model.request_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn refused_damaged_image_is_skipped_without_a_second_request() {
+        let model = MockCompletionModel::new([MockTurn::error(IMAGE_UNREADABLE)]);
+        let llm = LlmWrapper::new(model.clone());
+        let mut damaged = photo(ImageFormat::Jpeg);
+        damaged.truncate(16);
+
+        let description = llm.describe_image(&damaged, "image/jpeg").await.unwrap();
+
+        assert!(
+            description.contains("could not be decoded"),
+            "{}",
+            description
+        );
+        assert_eq!(model.request_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn errors_that_are_not_about_the_image_still_fail_the_description() {
+        let model = MockCompletionModel::new([MockTurn::error(
+            "429 Too Many Requests: rate limit reached for image inputs",
+        )]);
+        let llm = LlmWrapper::new(model.clone());
+
+        assert!(llm
+            .describe_image(&photo(ImageFormat::Jpeg), "image/jpeg")
+            .await
+            .is_err());
+        assert_eq!(model.request_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn refused_batch_is_described_one_image_at_a_time() {
+        let model = MockCompletionModel::new([
+            MockTurn::error(IMAGE_UNREADABLE),
+            MockTurn::text("A logo"),
+            MockTurn::error(IMAGE_UNREADABLE),
+            MockTurn::error(IMAGE_UNREADABLE),
+        ]);
+        let llm = LlmWrapper::with_config(
+            model.clone(),
+            LlmConfig::default().with_images_per_message(2),
+        );
+        let readable = photo(ImageFormat::Png);
+        let unreadable = photo(ImageFormat::Jpeg);
+
+        let descriptions = llm
+            .describe_images_batch(&[(&readable, "image/png"), (&unreadable, "image/jpeg")])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            descriptions,
+            vec!["A logo".to_string(), skipped_image(UNREADABLE_IMAGE)]
+        );
+        assert_eq!(model.request_count(), 4);
+    }
+
+    #[tokio::test]
+    async fn complete_multimodal_reads_the_text_when_no_image_encoding_is_accepted() {
+        let model = MockCompletionModel::new([
+            MockTurn::error(IMAGE_UNREADABLE),
+            MockTurn::error(IMAGE_UNREADABLE),
+            MockTurn::text("<notes page=\"1\">- A note</notes>"),
+        ]);
+        let llm = LlmWrapper::new(model.clone());
+        let parts = vec![
+            PromptPart::text("<page number=\"1\">"),
+            PromptPart::image(Bytes::from(photo(ImageFormat::Png)), "image/png"),
+            PromptPart::text("</page>"),
+        ];
+
+        let response = llm
+            .complete_multimodal("System rules", &parts, None)
+            .await
+            .unwrap();
+
+        assert_eq!(response.text, "<notes page=\"1\">- A note</notes>");
+        assert_eq!(
+            sent_image_types(&model),
+            vec![
+                vec![Some(ImageMediaType::PNG)],
+                vec![Some(ImageMediaType::JPEG)],
+                vec![]
+            ]
+        );
+        assert!(sent_text(&model.requests()[2]).contains(&skipped_image(UNREADABLE_IMAGE)));
     }
 }
