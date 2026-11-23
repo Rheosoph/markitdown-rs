@@ -433,7 +433,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   - `Page` - Single page/slide with page number and content blocks
     - `ContentBlock` - Individual content element (Text, Heading, Image, Table, List, Code, Quote, Markdown)
     - `rendered_image` - Optional full-page render (for scanned PDFs, slides with complex layouts)
-  - `ExtractedImage` - Image data with id, bytes, MIME type, dimensions, alt text, and LLM description
+  - `ExtractedImage` - Image data with id, bytes, MIME type, dimensions, alt text, and LLM description. The markdown refers to each image by its id (`![page3_image1](page3_image1)`), so a consumer can match text and images. Every image is PNG, JPEG, GIF or WebP; see `docs/ARCHITECTURE.md` (Working with Images)
 
 This structure is ideal for:
 - **Pagination-aware processing** - Handle each page separately

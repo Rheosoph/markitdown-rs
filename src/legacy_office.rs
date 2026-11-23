@@ -52,18 +52,6 @@ impl ImageFormat {
         }
     }
 
-    fn extension(&self) -> &'static str {
-        match self {
-            ImageFormat::Jpeg => "jpg",
-            ImageFormat::Png => "png",
-            ImageFormat::Wmf => "wmf",
-            ImageFormat::Emf => "emf",
-            ImageFormat::Dib => "bmp",
-            ImageFormat::Pict => "pict",
-            ImageFormat::Unknown => "bin",
-        }
-    }
-
     /// Detect image format from byte signature
     fn detect(data: &[u8]) -> Self {
         if data.len() < 8 {
@@ -169,8 +157,6 @@ impl DocConverter {
                         Bytes::from(image.data),
                         image.format.mime_type(),
                     );
-                    extracted.alt_text =
-                        Some(format!("image{}.{}", image.index, image.format.extension()));
                     extracted.page_number = Some(1);
                     page.add_content(ContentBlock::Image(extracted));
                 }
@@ -827,11 +813,6 @@ impl PptConverter {
                         Bytes::from(image.data),
                         image.format.mime_type(),
                     );
-                    extracted.alt_text = Some(format!(
-                        "slide_image{}.{}",
-                        image.index,
-                        image.format.extension()
-                    ));
                     extracted.page_number = Some(1);
                     page.add_content(ContentBlock::Image(extracted));
                 }

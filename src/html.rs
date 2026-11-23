@@ -26,17 +26,35 @@ impl HtmlConverter {
 
         let mut page = Page::new(1);
 
-        // Extract images if requested
-        if extract_images {
-            let images = extract_images_from_html(&content);
-            for img in images {
-                page.add_content(ContentBlock::Image(img));
+        // Embedded images (data URLs) become images where they stand; the HTML gets a marker in
+        // their place, so their base64 never ends up in the text. Linked images stay links.
+        let (content, images) = if extract_images {
+            embedded_images(&content)
+        } else {
+            (content, Vec::new())
+        };
+
+        // Convert HTML to markdown, then put the images back at their markers
+        let markdown = htmd::convert(&content).unwrap_or_default();
+        let marker = Regex::new(r"MARKITDOWNIMAGE(\d+)END").expect("valid regex");
+        let mut images: Vec<Option<ExtractedImage>> = images.into_iter().map(Some).collect();
+        let mut last = 0;
+        for found in marker.captures_iter(&markdown) {
+            let whole = found.get(0).expect("whole match");
+            let text = &markdown[last..whole.start()];
+            if !text.trim().is_empty() {
+                page.add_content(ContentBlock::Markdown(text.to_string()));
+            }
+            last = whole.end();
+            let index: usize = found[1].parse().unwrap_or(usize::MAX);
+            if let Some(image) = images.get_mut(index).and_then(Option::take) {
+                page.add_content(ContentBlock::Image(image));
             }
         }
-
-        // Convert HTML to markdown
-        let markdown = htmd::convert(&content).unwrap_or_default();
-        page.add_content(ContentBlock::Markdown(markdown));
+        let rest = &markdown[last..];
+        if !rest.trim().is_empty() || page.content.is_empty() {
+            page.add_content(ContentBlock::Markdown(rest.to_string()));
+        }
 
         document.add_page(page);
         Ok(document)
@@ -130,44 +148,26 @@ fn extract_title(html: &str) -> Option<String> {
     None
 }
 
-fn extract_images_from_html(html: &str) -> Vec<ExtractedImage> {
+/// Replace every `<img>` with a data URL by a marker (`MARKITDOWNIMAGE<n>END`) and return the
+/// images in marker order. Images with other sources are left in the HTML.
+fn embedded_images(html: &str) -> (String, Vec<ExtractedImage>) {
+    let img_re =
+        Regex::new(r#"<img[^>]*\s+src=["'](data:image/[^"']+)["'][^>]*>"#).expect("valid regex");
+    let alt_re = Regex::new(r#"alt=["']([^"']*)["']"#).expect("valid regex");
     let mut images = Vec::new();
-
-    // Match img tags and extract src and alt attributes
-    let img_re = Regex::new(r#"<img[^>]*\s+src=["']([^"']+)["'][^>]*>"#).ok();
-    let alt_re = Regex::new(r#"alt=["']([^"']*)["']"#).ok();
-
-    if let Some(re) = img_re {
-        for (idx, cap) in re.captures_iter(html).enumerate() {
-            let src = cap.get(1).map(|m| m.as_str().to_string());
-            let alt = alt_re.as_ref().and_then(|r| {
-                r.captures(&cap[0])
-                    .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
-            });
-
-            if let Some(src_url) = src {
-                // For data URLs, extract the actual image data
-                if src_url.starts_with("data:image/") {
-                    if let Some(extracted) = extract_data_url_image(&src_url, idx) {
-                        let mut img = extracted;
-                        img.alt_text = alt;
-                        images.push(img);
-                    }
-                } else {
-                    // For external URLs, create a placeholder
-                    let mut img = ExtractedImage::new(
-                        format!("html_image_{}", idx),
-                        Bytes::new(),
-                        "image/unknown",
-                    );
-                    img.alt_text = alt.or(Some(src_url));
-                    images.push(img);
-                }
-            }
-        }
-    }
-
-    images
+    let replaced = img_re.replace_all(html, |caps: &regex::Captures| {
+        let Some(mut image) = extract_data_url_image(&caps[1], images.len() + 1) else {
+            return caps[0].to_string();
+        };
+        image.alt_text = alt_re
+            .captures(&caps[0])
+            .map(|c| c[1].trim().to_string())
+            .filter(|alt| !alt.is_empty());
+        let marker = format!(" MARKITDOWNIMAGE{}END ", images.len());
+        images.push(image);
+        marker
+    });
+    (replaced.into_owned(), images)
 }
 
 fn extract_data_url_image(data_url: &str, idx: usize) -> Option<ExtractedImage> {

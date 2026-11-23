@@ -10,6 +10,10 @@
 //! In summarization mode, pages that need vision are not transcribed: they are rendered
 //! and attached as [`Page::rendered_image`] so the summarizer can read them directly.
 //!
+//! With `extract_images`, every page also gets its figures as images, after its text:
+//! embedded images and cut-outs of vector drawings such as charts (see `pdf_figures`).
+//! With an LLM client they are described like the images of other formats.
+//!
 //! Uses liteparse for PDF text extraction and hayro for rendering when LLM fallback is needed.
 
 use async_trait::async_trait;
@@ -266,6 +270,31 @@ impl PageMetrics {
 pub struct PdfConverter;
 
 impl PdfConverter {
+    /// Add the figures of every page after its text, and create pages that have only figures.
+    /// A drawing the interpreter cannot handle costs the figures, never the text.
+    fn attach_figures(document: &mut Document, pdf: &Pdf) {
+        let figures = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::pdf_figures::document_figures(pdf)
+        }))
+        .unwrap_or_default();
+        for (index, images) in figures.into_iter().enumerate() {
+            if images.is_empty() {
+                continue;
+            }
+            let number = index as u32 + 1;
+            let blocks = images.into_iter().map(ContentBlock::Image);
+            match document.pages.iter_mut().find(|p| p.page_number == number) {
+                Some(page) => page.content.extend(blocks),
+                None => {
+                    let mut page = Page::new(number);
+                    page.content.extend(blocks);
+                    document.pages.push(page);
+                }
+            }
+        }
+        document.pages.sort_by_key(|page| page.page_number);
+    }
+
     fn is_pdf_data(bytes: &[u8]) -> bool {
         let header_len = bytes.len().min(1024);
         bytes[..header_len]
@@ -557,6 +586,7 @@ impl PdfConverter {
         llm_client: Option<&dyn LlmClient>,
         force_llm: bool,
         summary: Option<&SummaryConfig>,
+        extract_images: bool,
     ) -> Result<Document, MarkitdownError> {
         // Text is aligned to the real page count whenever hayro could read the structure
         let (pdf, page_texts) = Self::load_pdf(bytes).await?;
@@ -656,6 +686,16 @@ impl PdfConverter {
             Self::try_llm_fallback_for_all_pages(&mut document, page_count, llm_client, &pdf).await;
         }
 
+        // Figures, described by the model (summarization reads the rendered pages instead)
+        if extract_images && summary.is_none() {
+            if let Some(pdf_ref) = &pdf {
+                Self::attach_figures(&mut document, pdf_ref);
+            }
+            if let Some(llm) = llm_client {
+                document = document.with_image_descriptions(llm).await?;
+            }
+        }
+
         // Final fallback
         if document.pages.is_empty() {
             Self::add_fallback_page(&mut document);
@@ -737,8 +777,12 @@ impl PdfConverter {
         document.add_page(page);
     }
 
-    /// Basic conversion without LLM (original behavior)
-    async fn convert_basic(&self, bytes: &[u8]) -> Result<Document, MarkitdownError> {
+    /// Basic conversion without LLM: the text layer, plus figures with `extract_images`
+    async fn convert_basic(
+        &self,
+        bytes: &[u8],
+        extract_images: bool,
+    ) -> Result<Document, MarkitdownError> {
         let (pdf, page_texts) = Self::load_pdf(bytes).await?;
         let actual_page_count = pdf.as_ref().map(|p| p.pages().len()).unwrap_or(0);
 
@@ -750,6 +794,12 @@ impl PdfConverter {
                 let mut page = Page::new((idx + 1) as u32);
                 page.add_content(ContentBlock::Text(trimmed.to_string()));
                 document.add_page(page);
+            }
+        }
+
+        if extract_images {
+            if let Some(pdf_ref) = &pdf {
+                Self::attach_figures(&mut document, pdf_ref);
             }
         }
 
@@ -811,12 +861,19 @@ impl DocumentConverter for PdfConverter {
             if let Some(llm) = &opts.llm_client {
                 let force_llm = opts.force_llm_ocr;
                 return self
-                    .convert_with_llm(&bytes, Some(llm.as_ref()), force_llm, opts.summary_config())
+                    .convert_with_llm(
+                        &bytes,
+                        Some(llm.as_ref()),
+                        force_llm,
+                        opts.summary_config(),
+                        opts.extract_images,
+                    )
                     .await;
             }
         }
 
-        self.convert_basic(&bytes).await
+        let extract_images = options.as_ref().is_none_or(|o| o.extract_images);
+        self.convert_basic(&bytes, extract_images).await
     }
 
     async fn convert_bytes(
@@ -840,12 +897,19 @@ impl DocumentConverter for PdfConverter {
             if let Some(llm) = &opts.llm_client {
                 let force_llm = opts.force_llm_ocr;
                 return self
-                    .convert_with_llm(&bytes, Some(llm.as_ref()), force_llm, opts.summary_config())
+                    .convert_with_llm(
+                        &bytes,
+                        Some(llm.as_ref()),
+                        force_llm,
+                        opts.summary_config(),
+                        opts.extract_images,
+                    )
                     .await;
             }
         }
 
-        self.convert_basic(&bytes).await
+        let extract_images = options.as_ref().is_none_or(|o| o.extract_images);
+        self.convert_basic(&bytes, extract_images).await
     }
 
     fn supported_extensions(&self) -> &[&str] {

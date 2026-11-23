@@ -30,6 +30,7 @@ pub mod opendocument;
 pub mod opml;
 pub mod orgmode;
 pub mod pdf;
+mod pdf_figures;
 pub mod pptx;
 pub mod prompts;
 pub mod rss;
@@ -88,6 +89,32 @@ use vcard::VCardConverter;
 use zip::ZipArchive;
 
 /// Reject conflicting ZIP headers before choosing document parts or entry names.
+/// Resolve an Office relationship target against the folder of the part that holds it
+/// (`ppt/slides` + `../media/image1.png` = `ppt/media/image1.png`; `/word/media/a.png` is
+/// already absolute)
+pub(crate) fn resolve_part_target(base_dir: &str, target: &str) -> String {
+    let (mut parts, target) = match target.strip_prefix('/') {
+        Some(absolute) => (Vec::new(), absolute),
+        None => (
+            base_dir
+                .split('/')
+                .filter(|part| !part.is_empty())
+                .collect(),
+            target,
+        ),
+    };
+    for segment in target.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            segment => parts.push(segment),
+        }
+    }
+    parts.join("/")
+}
+
 pub(crate) fn open_zip<R: Read + Seek>(reader: R) -> Result<ZipArchive<R>, MarkitdownError> {
     let mut archive = ZipArchive::new(reader)?;
     archive.validate_header_consistency()?;
@@ -316,9 +343,11 @@ impl MarkItDown {
 
     /// Summarize the converted document when in summarization mode
     async fn finish(
-        document: Document,
+        mut document: Document,
         summarization: Option<(SharedLlmClient, SummaryConfig)>,
     ) -> Result<Document, MarkitdownError> {
+        // Every image that leaves the library can be shown: no metafiles, no empty placeholders
+        document.normalize_images();
         match summarization {
             Some((llm, config)) => document.summarize(llm.as_ref(), &config).await,
             None => Ok(document),

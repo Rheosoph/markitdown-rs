@@ -199,21 +199,39 @@ impl DocumentConverter for PresentationConverter {
 
 ## Working with Images
 
-Converters can extract images and include them in the document:
+Converters add images as `ContentBlock::Image` at the position where the document shows them, when `options.extract_images` is set:
 
 ```rust
-// Extract an image
-let image = ExtractedImage {
-    data: Bytes::from(image_bytes),
-    media_type: "image/png".to_string(),
-    alt_text: Some("Description".to_string()),
-};
-
-// Add to page
+let mut image = ExtractedImage::new(format!("slide{}_image{}", slide, n), Bytes::from(bytes), mime);
+image.alt_text = alt_text_from_the_document; // never a file name
+image.page_number = Some(slide);
 page.add_content(ContentBlock::Image(image));
 ```
 
-When the document is serialized to Markdown with `.to_markdown()`, images are saved to disk and referenced as Markdown image links.
+**Ids link the text to the images.** `to_markdown()` writes every image as a placeholder with its id, followed by its description or alt text when there is one:
+
+```markdown
+![page3_image1](page3_image1)
+
+*Bar chart of revenue per quarter*
+```
+
+Ids are unique within a document: `page{n}_image{m}` (PDF), `slide{n}_image{m}` (PPTX), `image{n}` (DOCX), `html_image_{n}` (HTML). A consumer that stores the images elsewhere can find each one from its placeholder.
+
+**Every image that leaves the library can be shown.** `MarkItDown` calls `Document::normalize_images` on every result (and `with_image_descriptions` does it first):
+- PNG, JPEG, GIF and WebP stay as they are; BMP and TIFF are converted to PNG. The MIME type comes from the data, and width and height are filled in.
+- Images nothing can show (no data, Windows metafiles, unknown bytes) are removed together with their placeholder. If they have alt text, `[Image: <alt text>]` stays in their place.
+
+**Descriptions are made once per image.** `Document::with_image_descriptions` describes each distinct image data once and reuses the description wherever the image appears (the same logo on every slide costs one request).
+
+### PDF figures
+
+PDF pages have no image blocks of their own, so `src/pdf_figures.rs` finds them with an interpreter pass over each page (hayro, no rasterization):
+- **Embedded images** are taken at their own resolution. A JPEG that needs no conversion is passed through unchanged, other images become PNG (or JPEG when they look like a photo).
+- **Vector drawings** (charts exported from Office, diagrams) are found from their shapes: curves, slanted lines and fills in chart colours count; rules, frames, grey and pastel fills and boxes around text do not. Labels, legends and captions next to a drawing join it, and the region is cut out of a 2x render.
+- Left out: anything covering most of the page (scans, backgrounds), small items (logos, icons), images and shapes repeated at the same place on three or more pages (letterheads, slide templates) and tables.
+
+Figures follow the page text, in reading order. With an LLM client they are described like the images of other formats.
 
 ## LLM Modes: Extraction and Summarization
 

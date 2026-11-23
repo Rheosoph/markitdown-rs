@@ -1,10 +1,15 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use docx_rust::{
-    document::{BodyContent, TableCellContent, TableRowContent},
+    document::{
+        BodyContent, Paragraph, ParagraphContent, Run, RunContent, TableCellContent,
+        TableRowContent,
+    },
+    rels::TargetMode,
     DocxFile,
 };
 use object_store::{ObjectStore, ObjectStoreExt};
+use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::sync::Arc;
 
@@ -14,6 +19,60 @@ use crate::model::{
 };
 
 pub struct DocxConverter;
+
+/// Pictures in a paragraph, in order: relationship id of the picture and its alt text
+fn paragraph_pictures(paragraph: &Paragraph) -> Vec<(String, Option<String>)> {
+    let runs = paragraph
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            ParagraphContent::Run(run) => Some(run),
+            ParagraphContent::Link(link) => link.content.as_ref(),
+            _ => None,
+        });
+    let mut pictures = Vec::new();
+    for run in runs {
+        pictures.extend(run_pictures(run));
+    }
+    pictures
+}
+
+fn run_pictures(run: &Run) -> Vec<(String, Option<String>)> {
+    let mut pictures = Vec::new();
+    for content in &run.content {
+        let RunContent::Drawing(drawing) = content else {
+            continue;
+        };
+        let (doc_property, graphic) = match (&drawing.inline, &drawing.anchor) {
+            (Some(inline), _) => (&inline.doc_property, inline.graphic.as_ref()),
+            (None, Some(anchor)) => (&anchor.doc_property, anchor.graphic.as_ref()),
+            (None, None) => continue,
+        };
+        let Some(graphic) = graphic else {
+            continue;
+        };
+        for picture in &graphic.data.children {
+            let alt = doc_property
+                .descr
+                .as_deref()
+                .or_else(|| {
+                    picture
+                        .nv_pic_pr
+                        .c_nv_pr
+                        .as_ref()
+                        .and_then(|c| c.descr.as_deref())
+                })
+                .map(str::trim)
+                .filter(|alt| !alt.is_empty())
+                .map(str::to_string);
+            let embed = picture.fill.blip.embed.trim();
+            if !embed.is_empty() {
+                pictures.push((embed.to_string(), alt));
+            }
+        }
+    }
+    pictures
+}
 
 impl DocxConverter {
     fn convert_docx_bytes(
@@ -32,16 +91,33 @@ impl DocxConverter {
         let mut document = Document::new();
         let mut page = Page::new(1);
 
-        // Extract images from the DOCX file if requested
-        if extract_images {
-            let images = self.extract_images_from_docx(bytes)?;
-            for img in images {
-                page.add_content(ContentBlock::Image(img));
-            }
-        }
+        // Pictures stand where the document shows them, found through the relationships of the
+        // main part (not every file in word/media: some are unused, some belong to headers)
+        let relationships: HashMap<String, String> = doc
+            .document_rels
+            .as_ref()
+            .map(|rels| {
+                rels.relationships
+                    .iter()
+                    .filter(|rel| !matches!(rel.target_mode, Some(TargetMode::External)))
+                    .map(|rel| {
+                        (
+                            rel.id.to_string(),
+                            crate::resolve_part_target("word", &rel.target),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut archive = if extract_images {
+            Some(crate::open_zip(Cursor::new(bytes))?)
+        } else {
+            None
+        };
+        let mut picture_count = 0;
 
         // Process document content
-        for content in doc.document.body.content {
+        for content in &doc.document.body.content {
             match content {
                 BodyContent::Paragraph(paragraph) => {
                     let mut text = String::new();
@@ -50,6 +126,33 @@ impl DocxConverter {
                     }
                     if !text.trim().is_empty() {
                         page.add_content(ContentBlock::Text(text));
+                    }
+                    let Some(archive) = archive.as_mut() else {
+                        continue;
+                    };
+                    for (rel_id, alt) in paragraph_pictures(paragraph) {
+                        let Some(path) = relationships.get(&rel_id) else {
+                            continue;
+                        };
+                        let mut data = Vec::new();
+                        let Ok(mut file) = archive.by_name(path) else {
+                            continue;
+                        };
+                        if file.read_to_end(&mut data).is_err() || data.is_empty() {
+                            continue;
+                        }
+                        picture_count += 1;
+                        let mime_type = mime_guess::from_path(path)
+                            .first_or_octet_stream()
+                            .to_string();
+                        let mut image = ExtractedImage::new(
+                            format!("image{}", picture_count),
+                            Bytes::from(data),
+                            mime_type,
+                        );
+                        image.alt_text = alt;
+                        image.page_number = Some(1);
+                        page.add_content(ContentBlock::Image(image));
                     }
                 }
                 BodyContent::Table(table) => {
@@ -98,53 +201,6 @@ impl DocxConverter {
 
         document.add_page(page);
         Ok(document)
-    }
-
-    fn extract_images_from_docx(
-        &self,
-        bytes: &[u8],
-    ) -> Result<Vec<ExtractedImage>, MarkitdownError> {
-        let mut images = Vec::new();
-        let cursor = Cursor::new(bytes);
-        let mut archive = crate::open_zip(cursor)?;
-
-        for i in 0..archive.len() {
-            let mut file = archive.by_index(i)?;
-            let name = file.name()?.into_owned();
-
-            // Check if this is an image file in the media folder
-            if name.starts_with("word/media/") {
-                let mime_type = if name.ends_with(".png") {
-                    "image/png"
-                } else if name.ends_with(".jpg") || name.ends_with(".jpeg") {
-                    "image/jpeg"
-                } else if name.ends_with(".gif") {
-                    "image/gif"
-                } else if name.ends_with(".webp") {
-                    "image/webp"
-                } else if name.ends_with(".emf") || name.ends_with(".wmf") {
-                    continue; // Skip Windows metafiles
-                } else {
-                    continue;
-                };
-
-                let mut data = Vec::new();
-                file.read_to_end(&mut data)?;
-
-                let image_name = name
-                    .strip_prefix("word/media/")
-                    .unwrap_or(&name)
-                    .to_string();
-
-                images.push(ExtractedImage::new(
-                    image_name,
-                    Bytes::from(data),
-                    mime_type,
-                ));
-            }
-        }
-
-        Ok(images)
     }
 }
 

@@ -70,21 +70,21 @@ Converts Microsoft Word documents with support for:
 - Text and formatting (bold, italic, underline)
 - Headings and lists
 - Tables (with optional multi-page table merging)
-- Images (extractable)
+- Images (extractable): placed where the document shows them, with the alt text set in Word; unused media files and header images are left out
 - Comments and tracked changes
 
 #### HTML (.html, .htm)
 Extracts content from web pages and HTML documents:
 - Semantic HTML structure → Markdown headings/lists
 - Tables with proper formatting
-- Links and images
+- Links and images: embedded images (data URLs) become images at their position, linked images stay links
 - Code blocks
 
 #### PDF (.pdf)
 Text extraction from PDF files with:
 - Layout preservation where possible
 - Table detection and formatting
-- Image extraction
+- Figures with `extract_images`: embedded images and cut-outs of vector drawings such as charts, after each page's text (logos, letterheads, slide templates, backgrounds and tables are left out)
 - Multi-page support
 
 #### LaTeX (.tex, .latex)
@@ -122,9 +122,11 @@ Data serialization formats converted as structured text
 
 #### PowerPoint (.pptx, .ppt)
 Converts presentation slides:
-- Slide content as separate pages
-- Text, lists, and shapes
-- Images from slides
+- Slide content as separate pages, in presentation order (not file name order)
+- Text, lists, and shapes, one line per paragraph
+- Images from slides, with the alt text set in PowerPoint (background pictures are left out)
+- Native charts as a table of their data
+- Footer, date and slide number placeholders are left out
 - Notes (when available)
 
 ### Ebooks

@@ -63,6 +63,60 @@ impl ExtractedImage {
     pub fn get_display_text(&self) -> Option<&str> {
         self.description.as_deref().or(self.alt_text.as_deref())
     }
+
+    /// Make the image usable for display and for vision models, or report that it is not.
+    ///
+    /// PNG, JPEG, GIF and WebP stay as they are; other formats the `image` crate can decode
+    /// (BMP, TIFF) are converted to PNG. The MIME type is taken from the data, since a declared
+    /// type comes from a file name and is often wrong, and width and height are filled in.
+    /// Returns `false` for images nothing downstream can show: no data, Windows metafiles
+    /// (EMF/WMF) or bytes that are not a recognized image.
+    pub fn normalize(&mut self) -> bool {
+        use image::ImageFormat;
+
+        if self.data.is_empty() {
+            return false;
+        }
+        let Ok(format) = image::guess_format(&self.data) else {
+            return false;
+        };
+        match format {
+            ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Gif | ImageFormat::WebP => {
+                if self.width.is_none() || self.height.is_none() {
+                    let reader = image::ImageReader::with_format(
+                        std::io::Cursor::new(&self.data[..]),
+                        format,
+                    );
+                    match reader.into_dimensions() {
+                        Ok((width, height)) => {
+                            self.width = Some(width);
+                            self.height = Some(height);
+                        }
+                        Err(_) => return false,
+                    }
+                }
+            }
+            _ => {
+                let Ok(decoded) = image::load_from_memory_with_format(&self.data, format) else {
+                    return false;
+                };
+                let mut png = Vec::new();
+                if decoded
+                    .write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png)
+                    .is_err()
+                {
+                    return false;
+                }
+                self.width = Some(decoded.width());
+                self.height = Some(decoded.height());
+                self.data = Bytes::from(png);
+                self.mime_type = "image/png".to_string();
+                return true;
+            }
+        }
+        self.mime_type = format.to_mime_type().to_string();
+        true
+    }
 }
 
 /// Represents a block of content in a page
@@ -197,6 +251,28 @@ impl Page {
         if let Some(rendered_image) = &mut self.rendered_image {
             if rendered_image.source_path.is_none() {
                 rendered_image.source_path = Some(path.to_string());
+            }
+        }
+    }
+
+    /// Keep only images that can be shown (see [`ExtractedImage::normalize`]). An image that
+    /// cannot be shown is replaced by its alt text, if it has one, so the page still says what
+    /// was there.
+    pub fn normalize_images(&mut self) {
+        let content = std::mem::take(&mut self.content);
+        for block in content {
+            match block {
+                ContentBlock::Image(mut img) => {
+                    if img.normalize() {
+                        self.content.push(ContentBlock::Image(img));
+                    } else if let Some(text) = img.get_display_text().map(str::trim) {
+                        if !text.is_empty() {
+                            self.content
+                                .push(ContentBlock::Text(format!("[Image: {}]", text)));
+                        }
+                    }
+                }
+                other => self.content.push(other),
             }
         }
     }
@@ -388,18 +464,53 @@ impl Document {
         md
     }
 
-    /// Create a new document with all images replaced by LLM descriptions
+    /// Keep only images that can be shown, on every page (see [`Page::normalize_images`])
+    pub fn normalize_images(&mut self) {
+        for page in &mut self.pages {
+            page.normalize_images();
+        }
+    }
+
+    /// Create a new document with all images described by the LLM.
+    ///
+    /// Images that cannot be shown are dropped first (see [`Document::normalize_images`]), and
+    /// identical images (the same logo on every slide) are described once: one description per
+    /// distinct image data, reused wherever it appears.
     pub async fn with_image_descriptions(
         &self,
         llm_client: &dyn LlmClient,
     ) -> Result<Document, MarkitdownError> {
-        let mut new_doc = Document::new();
-        new_doc.title = self.title.clone();
-        new_doc.metadata = self.metadata.clone();
-        new_doc.summary = self.summary.clone();
+        let mut new_doc = self.clone();
+        new_doc.normalize_images();
 
-        for page in &self.pages {
-            new_doc.add_page(page.with_image_descriptions(llm_client).await?);
+        let mut distinct: Vec<&ExtractedImage> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for page in &new_doc.pages {
+            for img in page.images() {
+                if img.description.is_none() && seen.insert(img.data.clone()) {
+                    distinct.push(img);
+                }
+            }
+        }
+        if distinct.is_empty() {
+            return Ok(new_doc);
+        }
+
+        let descriptions = llm_client.describe_extracted_images(&distinct).await?;
+        let by_data: std::collections::HashMap<Bytes, String> = distinct
+            .iter()
+            .map(|img| img.data.clone())
+            .zip(descriptions)
+            .collect();
+
+        for page in &mut new_doc.pages {
+            for block in &mut page.content {
+                if let ContentBlock::Image(img) = block {
+                    if img.description.is_none() {
+                        img.description = by_data.get(&img.data).cloned();
+                    }
+                }
+            }
         }
 
         Ok(new_doc)
