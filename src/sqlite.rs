@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use object_store::{ObjectStore, ObjectStoreExt};
-use sqlx::{Row, SqlitePool};
+use sqlx::{AssertSqlSafe, Row, SqlitePool, ValueRef};
 use std::io::Write;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
@@ -15,6 +15,10 @@ use crate::model::{ContentBlock, ConversionOptions, Document, DocumentConverter,
 
 /// SQLite database converter
 pub struct SqliteConverter;
+
+fn quoted_identifier(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
 
 impl SqliteConverter {
     async fn convert_sqlite(bytes: &[u8]) -> Result<Document, MarkitdownError> {
@@ -52,11 +56,12 @@ impl SqliteConverter {
 
             for (table_name,) in &tables {
                 markdown.push_str(&format!("## Table: `{}`\n\n", table_name));
+                let table = quoted_identifier(table_name);
 
                 // Get table schema
-                let schema_query = format!("PRAGMA table_info('{}')", table_name);
+                let schema_query = format!("PRAGMA table_info({table})");
                 let columns: Vec<(i32, String, String, i32, Option<String>, i32)> =
-                    sqlx::query_as(&schema_query)
+                    sqlx::query_as(AssertSqlSafe(schema_query))
                         .fetch_all(&pool)
                         .await
                         .unwrap_or_default();
@@ -79,8 +84,8 @@ impl SqliteConverter {
                 }
 
                 // Get row count
-                let count_query = format!("SELECT COUNT(*) FROM \"{}\"", table_name);
-                let count: (i64,) = sqlx::query_as(&count_query)
+                let count_query = format!("SELECT COUNT(*) FROM {table}");
+                let count: (i64,) = sqlx::query_as(AssertSqlSafe(count_query))
                     .fetch_one(&pool)
                     .await
                     .unwrap_or((0,));
@@ -89,9 +94,12 @@ impl SqliteConverter {
 
                 // Get sample data (first 5 rows)
                 if count.0 > 0 && !columns.is_empty() {
-                    let sample_query = format!("SELECT * FROM \"{}\" LIMIT 5", table_name);
+                    let sample_query = format!("SELECT * FROM {table} LIMIT 5");
 
-                    if let Ok(rows) = sqlx::query(&sample_query).fetch_all(&pool).await {
+                    if let Ok(rows) = sqlx::query(AssertSqlSafe(sample_query))
+                        .fetch_all(&pool)
+                        .await
+                    {
                         if !rows.is_empty() {
                             markdown.push_str("### Sample Data (first 5 rows)\n\n");
 
@@ -114,6 +122,9 @@ impl SqliteConverter {
                             for row in &rows {
                                 let values: Vec<String> = (0..columns.len())
                                     .map(|i| {
+                                        if row.try_get_raw(i).map_or(true, |v| v.is_null()) {
+                                            return "NULL".to_string();
+                                        }
                                         row.try_get::<String, _>(i)
                                             .or_else(|_| {
                                                 row.try_get::<i64, _>(i).map(|v| v.to_string())
